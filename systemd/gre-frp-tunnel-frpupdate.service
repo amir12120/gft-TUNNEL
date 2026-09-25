@@ -1,0 +1,11 @@
+[Unit]
+Description=GRE+FRP-TUNNEL — keep frp at the latest upstream release
+Documentation=https://github.com/amir12120/GRE-FRP-TUNNEL
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=__CLI__ update-frp --quiet
+TimeoutStartSec=600

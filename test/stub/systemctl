@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# ============================================================
+# test/stub/systemctl — tracks enabled/active units in flat files
+# ============================================================
+S="${STUB_TMP:?STUB_TMP is not set}"
+mkdir -p "$S"
+echo "systemctl $*" >>"$S/systemctl.log"
+
+ACTIVE="$S/systemctl.active"
+ENABLED="$S/systemctl.enabled"
+: >>"$ACTIVE"
+: >>"$ENABLED"
+
+is_active()    { grep -qx "$1" "$ACTIVE" 2>/dev/null; }
+set_active()   { is_active "$1" || echo "$1" >>"$ACTIVE"; }
+set_inactive() { grep -v -x "$1" "$ACTIVE" >"$ACTIVE.tmp" 2>/dev/null || true; mv "$ACTIVE.tmp" "$ACTIVE"; }
+set_enabled()  { grep -qx "$1" "$ENABLED" 2>/dev/null || echo "$1" >>"$ENABLED"; }
+set_disabled() { grep -v -x "$1" "$ENABLED" >"$ENABLED.tmp" 2>/dev/null || true; mv "$ENABLED.tmp" "$ENABLED"; }
+
+verb="$1"; shift || true
+
+now=0
+quiet=0
+units=()
+for a in "$@"; do
+  case "$a" in
+    --now)   now=1 ;;
+    --quiet) quiet=1 ;;
+    -*) : ;;
+    *) units+=("$a") ;;
+  esac
+done
+
+case "$verb" in
+  is-active)
+    if is_active "${units[0]:-}"; then
+      [ "$quiet" = "1" ] || echo active
+      exit 0
+    fi
+    [ "$quiet" = "1" ] || echo inactive
+    exit 3
+    ;;
+  is-enabled)
+    grep -qx "${units[0]:-}" "$ENABLED" 2>/dev/null && exit 0
+    exit 1
+    ;;
+  restart|start|reload)
+    for u in "${units[@]:-}"; do [ -n "$u" ] && set_active "$u"; done
+    exit 0
+    ;;
+  stop)
+    for u in "${units[@]:-}"; do [ -n "$u" ] && set_inactive "$u"; done
+    exit 0
+    ;;
+  enable)
+    for u in "${units[@]:-}"; do
+      [ -n "$u" ] || continue
+      set_enabled "$u"
+      [ "$now" = "1" ] && set_active "$u"
+    done
+    exit 0
+    ;;
+  disable)
+    for u in "${units[@]:-}"; do
+      [ -n "$u" ] || continue
+      set_disabled "$u"
+      [ "$now" = "1" ] && set_inactive "$u"
+    done
+    exit 0
+    ;;
+  daemon-reload|daemon-reexec|reset-failed) exit 0 ;;
+  *) exit 0 ;;
+esac

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# ============================================================
+# test/stub/ss — lists the ports in $STUB_LISTEN as listeners
+# ============================================================
+S="${STUB_TMP:?STUB_TMP is not set}"
+echo "ss $*" >>"$S/ss.log"
+echo "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process"
+for p in ${STUB_LISTEN:-}; do
+  echo "LISTEN 0 4096 0.0.0.0:$p 0.0.0.0:*"
+done
+exit 0

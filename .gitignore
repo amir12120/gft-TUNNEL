@@ -1,0 +1,10 @@
+*.log
+*.out
+*.tmp
+.tmp/
+tmp/
+test/.work/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

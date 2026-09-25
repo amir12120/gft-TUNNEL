@@ -1,0 +1,18 @@
+[Unit]
+Description=GRE+FRP-TUNNEL — persistent GRE link between the Iran relay and the foreign server
+Documentation=https://github.com/amir12120/GRE-FRP-TUNNEL
+After=network-online.target
+Wants=network-online.target
+Before=frps.service frpc.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=__CLI__ service-up
+ExecStop=__CLI__ service-down
+ExecReload=__CLI__ service-up
+TimeoutStartSec=180
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

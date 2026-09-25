@@ -1,0 +1,12 @@
+[Unit]
+Description=GRE+FRP-TUNNEL — check for a newer frp release every day
+Documentation=https://github.com/amir12120/GRE-FRP-TUNNEL
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+Unit=gre-frp-tunnel-frpupdate.service
+
+[Install]
+WantedBy=timers.target

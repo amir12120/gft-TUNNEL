@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# test/stub/apt-get — logs what would have been installed
+S="${STUB_TMP:-/tmp}"
+mkdir -p "$S"
+echo "apt-get $*" >>"$S/pkg.log"
+exit 0

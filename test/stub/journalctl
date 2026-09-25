@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# test/stub/journalctl
+S="${STUB_TMP:-/tmp}"
+echo "journalctl $*" >>"$S/journalctl.log"
+echo "-- fake journal --"
+exit 0

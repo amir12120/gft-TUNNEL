@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# ============================================================
+# test/stub/nc — the UDP send probe
+# ============================================================
+S="${STUB_TMP:?STUB_TMP is not set}"
+echo "nc $*" >>"$S/nc.log"
+exit 0

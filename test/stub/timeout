@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# ============================================================
+# test/stub/timeout — used by the TCP port probe.
+# STUB_TCP_OPEN=0 makes the probe fail instead.
+# ============================================================
+S="${STUB_TMP:?STUB_TMP is not set}"
+echo "timeout $*" >>"$S/timeout.log"
+[ "${STUB_TCP_OPEN:-1}" = "1" ] && exit 0
+exit 124

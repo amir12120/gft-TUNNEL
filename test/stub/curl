@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# ============================================================
+# test/stub/curl
+#
+# Answers the few URLs the project uses:
+#   * fatedier/frp latest release API   → a JSON payload
+#   * the /releases/latest redirect      → a Location header
+#   * the frp tarball                    → a real tar.gz with stub binaries
+#   * the checksum file                  → the matching sha256 line
+#   * IP echo services                   → $STUB_PUBLIC_IP
+# ============================================================
+S="${STUB_TMP:?STUB_TMP is not set}"
+mkdir -p "$S/dl"
+echo "curl $*" >>"$S/curl.log"
+
+FRP_VERSION="${STUB_FRP_VERSION:-0.99.0}"
+FRP_TAG="v${FRP_VERSION}"
+ARCH="${STUB_ARCH:-amd64}"
+PUBLIC_IP="${STUB_PUBLIC_IP:-203.0.113.10}"
+ASSET="frp_${FRP_VERSION}_linux_${ARCH}.tar.gz"
+
+out=""; url=""; head=0
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  a="${args[$i]}"
+  case "$a" in
+    -o)  i=$(( i + 1 )); out="${args[$i]:-}" ;;
+    -o*) out="${a#-o}" ;;
+    -H|-A|-d|--data|-x) i=$(( i + 1 )) ;;
+    -I|--head|-fsSI|-sI) head=1 ;;
+    http://*|https://*) url="$a" ;;
+    *) : ;;
+  esac
+  i=$(( i + 1 ))
+done
+
+[ -n "$url" ] || exit 0
+
+case "$url" in
+  *api.github.com*repos/fatedier/frp/releases/latest*)
+    # STUB_API_DOWN=1 simulates the API being unreachable (rate limit, DNS …)
+    [ "${STUB_API_DOWN:-0}" = "1" ] && exit 22
+    cat <<EOF
+{
+  "tag_name": "$FRP_TAG",
+  "name": "$FRP_TAG",
+  "published_at": "2026-01-01T00:00:00Z",
+  "assets": [
+    { "name": "frp_${FRP_VERSION}_linux_amd64.tar.gz" },
+    { "name": "frp_${FRP_VERSION}_linux_arm64.tar.gz" },
+    { "name": "frp_sha256_checksums.txt" }
+  ]
+}
+EOF
+    exit 0
+    ;;
+
+  */releases/latest)
+    printf 'HTTP/2 302\r\nlocation: https://github.com/fatedier/frp/releases/tag/%s\r\n\r\n' "$FRP_TAG"
+    exit 0
+    ;;
+
+  *frp_sha256_checksums.txt*)
+    sha="$S/dl/asset.sha"
+    if [ "${STUB_BAD_CHECKSUM:-0}" = "1" ]; then
+      printf '%s  %s\n' "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$ASSET" >"$out"
+    elif [ -f "$sha" ]; then
+      printf '%s  %s\n' "$(cat "$sha")" "$ASSET" >"$out"
+    else
+      printf '%s  %s\n' "0000000000000000000000000000000000000000000000000000000000000000" "$ASSET" >"$out"
+    fi
+    exit 0
+    ;;
+
+  *"frp_${FRP_VERSION}_linux_${ARCH}.tar.gz"*)
+    [ -n "$out" ] || exit 0
+    if [ "${STUB_JUNK_ARCHIVE:-0}" = "1" ]; then
+      printf 'this is not a tar archive\n' >"$out"
+      command -v sha256sum >/dev/null 2>&1 \
+        && sha256sum "$out" | awk '{print $1}' >"$S/dl/asset.sha"
+      exit 0
+    fi
+    tmpd="$S/dl/tree"
+    rm -rf "$tmpd"
+    mkdir -p "$tmpd/frp_${FRP_VERSION}_linux_${ARCH}"
+    for b in frps frpc; do
+      cat >"$tmpd/frp_${FRP_VERSION}_linux_${ARCH}/$b" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    --version|-v) echo "$b version $FRP_VERSION"; exit 0 ;;
+  esac
+done
+echo "$b (stub)"
+EOF
+      chmod +x "$tmpd/frp_${FRP_VERSION}_linux_${ARCH}/$b"
+    done
+    tar -czf "$out" -C "$tmpd" "frp_${FRP_VERSION}_linux_${ARCH}" || exit 1
+    if command -v sha256sum >/dev/null 2>&1; then
+      sha256sum "$out" | awk '{print $1}' >"$S/dl/asset.sha"
+    fi
+    exit 0
+    ;;
+
+  *ipify*|*ifconfig.me*|*ipinfo.io*|*icanhazip*|*ip.sb*)
+    if [ "${STUB_NO_PUBLIC_IP:-0}" = "1" ]; then
+      exit 7
+    fi
+    printf '%s\n' "$PUBLIC_IP"
+    exit 0
+    ;;
+
+  *) exit 0 ;;
+esac

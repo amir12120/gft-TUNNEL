@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# ============================================================
+# test/stub/ping
+#
+# Simulates a network with a known path MTU, hop count and
+# optional per-TTL loss, so the MTU/TTL autotuner can be tested
+# deterministically.
+#
+#   STUB_PATH_MTU     outer path MTU to the peer public IP   (default 1500)
+#   STUB_HOPS         hops to the peer public IP             (default 6)
+#   STUB_MIN_TTL      minimum outer TTL that survives        (default HOPS+1)
+#   STUB_LOSS_AT_TTL  "64:50;128:0" — loss % for a given TTL
+#   STUB_LOSS_AT_MTU  "1472:50"      — loss % for a given tunnel MTU
+# ============================================================
+S="${STUB_TMP:?STUB_TMP is not set}"
+mkdir -p "$S"
+echo "ping $*" >>"$S/ping.log"
+
+GRE_REMOTE="${STUB_GRE_REMOTE:-10.99.99.2}"
+PEER_PUBLIC="${STUB_PEER_PUBLIC:-198.51.100.9}"
+PATH_MTU="${STUB_PATH_MTU:-1500}"
+HOPS="${STUB_HOPS:-6}"
+MIN_TTL="${STUB_MIN_TTL:-$((HOPS + 1))}"
+
+count=1; size=""; ttl=""; dst=""
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  a="${args[$i]}"
+  case "$a" in
+    -c) i=$(( i + 1 )); count="${args[$i]:-1}" ;;
+    -s) i=$(( i + 1 )); size="${args[$i]:-0}" ;;
+    -t) i=$(( i + 1 )); ttl="${args[$i]:-64}" ;;
+    -W|-i|-I|-p|-Q|-w) i=$(( i + 1 )) ;;
+    -M) i=$(( i + 1 )) ;;
+    -*) : ;;
+    *)  dst="$a" ;;
+  esac
+  i=$(( i + 1 ))
+done
+
+is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+is_uint "$count" || count=1
+
+tunnel_mtu() {
+  local m
+  m="$(grep -m1 "^devmtu gre-frp " "$S/ip.state" 2>/dev/null | awk '{print $3}')"
+  is_uint "$m" || m=1472
+  printf '%s' "$m"
+}
+
+# The outer TTL of an encapsulated packet comes from the GRE device, not
+# from the ping flag, so that is what an in-tunnel probe depends on.
+dev_ttl() {
+  local t
+  t="$(grep -m1 "^devttl gre-frp " "$S/ip.state" 2>/dev/null | awk '{print $3}')"
+  is_uint "$t" || t=64
+  printf '%s' "$t"
+}
+
+ok=1
+kind=""
+if [ "$dst" = "$GRE_REMOTE" ]; then
+  kind="tunnel"
+  ttl="$(dev_ttl)"
+  if [ "$ttl" -lt "$MIN_TTL" ]; then ok=0; fi
+  if [ -n "$size" ] && is_uint "$size"; then
+    [ $(( size + 28 )) -gt "$(tunnel_mtu)" ] && ok=0
+  fi
+elif [ "$dst" = "$PEER_PUBLIC" ]; then
+  kind="path"
+  if [ -n "$ttl" ] && [ "$ttl" -lt "$HOPS" ]; then ok=0; fi
+  if [ -n "$size" ] && is_uint "$size"; then
+    [ $(( size + 28 )) -gt "$PATH_MTU" ] && ok=0
+  fi
+else
+  ok=0
+fi
+
+# Simulated loss: STUB_LOSS_AT_TTL applies to in-tunnel pings that carry an
+# explicit TTL, STUB_LOSS_AT_MTU to in-tunnel pings while the device sits at
+# that MTU (used to test the step-down path of the autotuner).
+loss=0
+if [ "$ok" = "1" ] && [ "$kind" = "tunnel" ]; then
+  if [ -n "$ttl" ] && [ -n "${STUB_LOSS_AT_TTL:-}" ]; then
+    loss="$(printf '%s' "$STUB_LOSS_AT_TTL" | tr ';' '\n' | awk -F: -v t="$ttl" '$1 == t {print $2; exit}')"
+    is_uint "$loss" || loss=0
+  elif [ -n "${STUB_LOSS_AT_MTU:-}" ]; then
+    if [ "$(tunnel_mtu)" = "${STUB_LOSS_AT_MTU%%:*}" ]; then
+      loss="${STUB_LOSS_AT_MTU##*:}"
+      is_uint "$loss" || loss=0
+    fi
+  fi
+fi
+
+if [ "$ok" != "1" ]; then
+  echo "PING $dst ($dst): 56 data bytes"
+  echo "ping: sendmsg: Network is unreachable" >&2
+  exit 1
+fi
+
+replies=$(( count * (100 - loss) / 100 ))
+echo "PING $dst ($dst): ${size:-56} data bytes"
+i=1
+while [ "$i" -le "$replies" ]; do
+  echo "$(( ${size:-56} + 8 ))+8 bytes from $dst: icmp_seq=$i ttl=60 time=1.23 ms"
+  i=$(( i + 1 ))
+done
+echo "--- $dst ping statistics ---"
+echo "$count packets transmitted, $replies received, $loss% packet loss"
+[ "$replies" -ge 1 ] && exit 0
+exit 1

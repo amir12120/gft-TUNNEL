@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# ============================================================
+# test/stub/firewall-cmd
+# Reports "not running" unless STUB_FIREWALLD=1, in which case it
+# records --direct rules just like the real thing would.
+# ============================================================
+S="${STUB_TMP:?STUB_TMP is not set}"
+mkdir -p "$S"
+echo "firewall-cmd $*" >>"$S/firewall-cmd.log"
+
+for a in "$@"; do
+  if [ "$a" = "--state" ]; then
+    if [ "${STUB_FIREWALLD:-0}" = "1" ]; then echo running; exit 0; fi
+    echo "not running"
+    exit 252
+  fi
+done
+
+if [ "${STUB_FIREWALLD:-0}" = "1" ]; then
+  echo "$*" >>"$S/firewalld.rules"
+fi
+exit 0

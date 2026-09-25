@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# ============================================================
+# test/stub/ufw — inactive unless STUB_UFW=1
+# ============================================================
+S="${STUB_TMP:?STUB_TMP is not set}"
+mkdir -p "$S"
+echo "ufw $*" >>"$S/ufw.log"
+
+if [ "${1:-}" = "status" ]; then
+  if [ "${STUB_UFW:-0}" = "1" ]; then
+    echo "Status: active"
+  else
+    echo "Status: inactive"
+  fi
+  exit 0
+fi
+exit 0

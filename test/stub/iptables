@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# ============================================================
+# test/stub/iptables — remembers rules so -C (check) works
+# ============================================================
+S="${STUB_TMP:?STUB_TMP is not set}"
+mkdir -p "$S"
+table="filter"
+if [ "${1:-}" = "-t" ]; then
+  table="${2:-filter}"
+  shift 2
+fi
+STATE="$S/iptables.$table.state"
+: >>"$STATE"
+echo "iptables -t $table $*" >>"$S/iptables.log"
+
+action="$1"; shift || true
+
+case "$action" in
+  -C)
+    # the chain is not part of the stored rule, mirror that here
+    shift || true
+    # -e is required: a rule spec starts with "-p tcp …" and grep would
+    # otherwise try to read it as an option
+    grep -Fxq -e "$*" "$STATE" 2>/dev/null && exit 0
+    exit 1
+    ;;
+  -I)
+    # -I <chain> <position> <spec...>
+    shift || true   # chain
+    shift || true   # position
+    echo "$*" >>"$STATE"
+    exit 0
+    ;;
+  -D)
+    shift || true   # chain
+    grep -Fxv -e "$*" "$STATE" >"$STATE.tmp" 2>/dev/null || true
+    mv "$STATE.tmp" "$STATE"
+    exit 0
+    ;;
+  -A)
+    shift || true
+    echo "$*" >>"$STATE"
+    exit 0
+    ;;
+  -S|-L)
+    cat "$STATE" 2>/dev/null
+    exit 0
+    ;;
+  -F)
+    case "${1:-}" in
+      "") : >"$STATE" ;;
+      *)  grep -v "^.*$1" "$STATE" >"$STATE.tmp" 2>/dev/null || true; mv "$STATE.tmp" "$STATE" ;;
+    esac
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac

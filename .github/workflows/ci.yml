@@ -1,0 +1,83 @@
+name: Smoke Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke test (stubbed install on both roles)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bash syntax check (every script)
+        run: |
+          fail=0
+          for f in gre-frp-tunnel install.sh lib/*.sh test/*.sh test/stub/*; do
+            [ -f "$f" ] || continue
+            if bash -n "$f"; then
+              echo "ok   $f"
+            else
+              echo "FAIL $f"; fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          echo "all scripts pass bash -n"
+
+      - name: ShellCheck (errors are fatal)
+        run: |
+          shellcheck --version
+          shellcheck -S error -e SC1090,SC1091 \
+            gre-frp-tunnel install.sh lib/*.sh test/smoke.sh test/stub/*
+
+      - name: ShellCheck (warnings, informational)
+        continue-on-error: true
+        run: |
+          shellcheck -S warning -f gcc -e SC1090,SC1091 \
+            gre-frp-tunnel install.sh lib/*.sh test/smoke.sh test/stub/* \
+            | tee /tmp/shellcheck-warnings.txt
+          echo "$(wc -l </tmp/shellcheck-warnings.txt) warning line(s)"
+
+      - name: Run the smoke test suite
+        run: |
+          chmod +x gre-frp-tunnel install.sh lib/*.sh test/*.sh test/stub/*
+          bash test/smoke.sh
+
+      - name: Show the written configuration on failure
+        if: failure()
+        run: |
+          for d in /tmp/gre-frp-smoke.*/*/; do
+            echo "==== $d ===="
+            [ -f "$d/out.txt" ] && tail -40 "$d/out.txt"
+            [ -f "$d/state/config.env" ] && cat "$d/state/config.env"
+            [ -f "$d/etc/frps.toml" ] && cat "$d/etc/frps.toml"
+            [ -f "$d/etc/frpc.toml" ] && cat "$d/etc/frpc.toml"
+          done || true
+
+      - name: Upload smoke artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-artifacts
+          path: |
+            /tmp/gre-frp-smoke.*/**
+            /tmp/*.out
+          if-no-files-found: ignore
+
+  shellcheck-strict:
+    name: ShellCheck (strict, informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck (style, informational)
+        run: shellcheck -S style -e SC1090,SC1091 gre-frp-tunnel lib/*.sh install.sh || true

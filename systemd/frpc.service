@@ -1,0 +1,18 @@
+[Unit]
+Description=frp client (frpc) — GRE+FRP-TUNNEL client on the foreign server
+Documentation=https://github.com/fatedier/frp
+After=network-online.target gre-frp-tunnel.service
+Wants=network-online.target
+Requires=gre-frp-tunnel.service
+
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=3
+ExecStart=__BIN__/frpc -c __FRP_ETC__/frpc.toml
+ExecReload=/bin/kill -HUP $MAINPID
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

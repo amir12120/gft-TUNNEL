@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# test/stub/modprobe
+S="${STUB_TMP:-/tmp}"
+mkdir -p "$S"
+echo "modprobe $*" >>"$S/modprobe.log"
+exit 0

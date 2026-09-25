@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# test/stub/dnf — logs what would have been installed
+S="${STUB_TMP:-/tmp}"
+mkdir -p "$S"
+echo "dnf $*" >>"$S/pkg.log"
+exit 0

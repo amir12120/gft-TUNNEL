@@ -1,0 +1,8 @@
+# Everything here runs on Linux servers. Force LF so that a Windows
+# checkout (core.autocrlf=true) can never introduce CR characters that
+# break the shell scripts.
+* text=auto eol=lf
+
+# keep the release archives binary
+*.tar.gz binary
+*.png binary

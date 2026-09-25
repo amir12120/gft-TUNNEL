@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# ============================================================
+# test/stub/ip — a tiny stateful fake of iproute2.
+# Every call is logged, so the smoke test can assert exactly which
+# commands the CLI tried to run.
+# ============================================================
+S="${STUB_TMP:?STUB_TMP is not set}"
+mkdir -p "$S"
+STATE="$S/ip.state"
+LOG="$S/ip.log"
+: >>"$STATE"
+echo "ip $*" >>"$LOG"
+
+PUBLIC_IP="${STUB_PUBLIC_IP:-203.0.113.10}"
+IFACE="${STUB_IFACE:-eth0}"
+IFACE_MTU="${STUB_IFACE_MTU:-1500}"
+
+dev_exists() { grep -qx "dev $1" "$STATE" 2>/dev/null; }
+dev_mtu()    { grep -m1 "^devmtu $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
+dev_ttl()    { grep -m1 "^devttl $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
+dev_addrs()  { grep "^addr $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
+
+full="$*"
+
+case "$full" in
+  # ---------------------------------------------------------- create
+  "link add name "*|"link add "*" type gre"*)
+    name="$(awk '{for (i = 1; i <= NF; i++) if ($i == "name") print $(i + 1)}' <<<"$full")"
+    [ -n "$name" ] || name="$(awk '{for (i = 1; i <= NF; i++) if ($i == "add") {print $(i + 1); exit}}' <<<"$full")"
+    if dev_exists "$name"; then
+      echo "RTNETLINK answers: File exists" >&2
+      exit 2
+    fi
+    ttl="$(awk '{for (i = 1; i <= NF; i++) if ($i == "ttl") print $(i + 1)}' <<<"$full")"
+    echo "dev $name" >>"$STATE"
+    [ -n "$ttl" ] && echo "devttl $name $ttl" >>"$STATE"
+    exit 0
+    ;;
+
+  # ---------------------------------------------------------- delete
+  "link del "*|"link delete "*)
+    name="${full##* }"
+    if dev_exists "$name"; then
+      grep -v -E "^(dev|devmtu|devttl|addr|up) $name( |$)" "$STATE" >"$STATE.tmp" 2>/dev/null || true
+      mv "$STATE.tmp" "$STATE"
+      exit 0
+    fi
+    echo "Cannot find device \"$name\"" >&2
+    exit 1
+    ;;
+
+  # ---------------------------------------------------------- set mtu / up / ttl
+  "link set dev "*" mtu "*)
+    name="$(awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}' <<<"$full")"
+    mtu="$(awk '{for (i = 1; i <= NF; i++) if ($i == "mtu") print $(i + 1)}' <<<"$full")"
+    dev_exists "$name" || { echo "Cannot find device \"$name\"" >&2; exit 1; }
+    grep -v "^devmtu $name " "$STATE" >"$STATE.tmp" 2>/dev/null || true
+    mv "$STATE.tmp" "$STATE"
+    echo "devmtu $name $mtu" >>"$STATE"
+    exit 0
+    ;;
+  "link set dev "*" type gre ttl "*|"tunnel change "*" ttl "*)
+    name="$(awk '{for (i = 1; i <= NF; i++) if ($i == "dev" || $i == "change") {print $(i + 1); exit}}' <<<"$full")"
+    ttl="$(awk '{for (i = 1; i <= NF; i++) if ($i == "ttl") print $(i + 1)}' <<<"$full")"
+    grep -v "^devttl $name " "$STATE" >"$STATE.tmp" 2>/dev/null || true
+    mv "$STATE.tmp" "$STATE"
+    echo "devttl $name $ttl" >>"$STATE"
+    exit 0
+    ;;
+  "link set dev "*" up")
+    name="$(awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}' <<<"$full")"
+    dev_exists "$name" || { echo "Cannot find device \"$name\"" >&2; exit 1; }
+    grep -qx "up $name" "$STATE" || echo "up $name" >>"$STATE"
+    exit 0
+    ;;
+
+  # ---------------------------------------------------------- addresses
+  "addr add "*)
+    spec="$(awk '{for (i = 1; i <= NF; i++) if ($i == "add") {print $(i + 1); exit}}' <<<"$full")"
+    name="$(awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}' <<<"$full")"
+    echo "addr $name $spec" >>"$STATE"
+    exit 0
+    ;;
+  "addr del "*)
+    spec="$(awk '{for (i = 1; i <= NF; i++) if ($i == "add" || $i == "del") {print $(i + 1); exit}}' <<<"$full")"
+    grep -v -F " $spec" "$STATE" >"$STATE.tmp" 2>/dev/null || true
+    mv "$STATE.tmp" "$STATE"
+    exit 0
+    ;;
+
+  # ---------------------------------------------------------- show
+  "-4 -o addr show dev "*|"-o -4 addr show dev "*)
+    name="${full##* }"
+    dev_exists "$name" || exit 1
+    for a in $(dev_addrs "$name"); do
+      echo "3: $name    inet $a scope global $name"
+    done
+    exit 0
+    ;;
+  *"addr show"*"scope global"*)
+    echo "1: lo    inet 127.0.0.1/8 scope host lo"
+    echo "2: $IFACE    inet $PUBLIC_IP/24 brd 203.0.113.255 scope global $IFACE"
+    if dev_exists gre-frp; then
+      for a in $(dev_addrs gre-frp); do
+        echo "3: gre-frp    inet $a scope global gre-frp"
+      done
+    fi
+    exit 0
+    ;;
+  *"link show dev "*)
+    name="${full##*dev }"; name="${name%% *}"
+    if dev_exists "$name"; then
+      mtu="$(dev_mtu "$name")"; [ -n "$mtu" ] || mtu=1472
+      echo "9: $name: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu $mtu qdisc noqueue state UNKNOWN mode DEFAULT group default"
+      echo "    gre remote any local any ttl inherit"
+      exit 0
+    fi
+    echo "Device \"$name\" does not exist." >&2
+    exit 1
+    ;;
+  # a single named interface: `ip -o link show eth0`
+  *"link show "*)
+    name="${full##* }"
+    case "$name" in
+      lo)
+        echo "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default"
+        exit 0
+        ;;
+      "$IFACE")
+        echo "2: $IFACE: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu $IFACE_MTU qdisc pfifo_fast state UP mode DEFAULT group default"
+        exit 0
+        ;;
+    esac
+    if dev_exists "$name"; then
+      mtu="$(dev_mtu "$name")"; [ -n "$mtu" ] || mtu=1472
+      echo "9: $name: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu $mtu qdisc noqueue state UNKNOWN mode DEFAULT group default"
+      exit 0
+    fi
+    echo "Device \"$name\" does not exist." >&2
+    exit 1
+    ;;
+  *"link show"*)
+    echo "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default"
+    echo "2: $IFACE: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu $IFACE_MTU qdisc pfifo_fast state UP mode DEFAULT group default"
+    if dev_exists gre-frp; then
+      mtu="$(dev_mtu gre-frp)"; [ -n "$mtu" ] || mtu=1472
+      echo "9: gre-frp: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu $mtu qdisc noqueue state UNKNOWN mode DEFAULT group default"
+    fi
+    exit 0
+    ;;
+
+  # ---------------------------------------------------------- routes
+  *"route show default"*)
+    echo "default via 203.0.113.1 dev $IFACE proto static metric 100"
+    exit 0
+    ;;
+  *"route get "*)
+    echo "1.1.1.1 via 203.0.113.1 dev $IFACE src $PUBLIC_IP uid 0"
+    exit 0
+    ;;
+
+  *) exit 0 ;;
+esac

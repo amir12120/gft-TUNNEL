@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# test/stub/apk — logs what would have been installed
+S="${STUB_TMP:-/tmp}"
+mkdir -p "$S"
+echo "apk $*" >>"$S/pkg.log"
+exit 0

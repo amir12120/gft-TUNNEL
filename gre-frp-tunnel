@@ -1,0 +1,726 @@
+#!/usr/bin/env bash
+# ============================================================
+# GRE+FRP-TUNNEL
+#
+# A GRE tunnel between an Iranian relay and a foreign server,
+# carrying a reverse FRP tunnel so that the VPN panel running on
+# the foreign box is reachable on the Iranian IP — better ping and
+# reachable from every Iranian ISP.
+#
+# Usage:  sudo gre-frp-tunnel [command]
+#
+#   install        Guided setup (prerequisites, role, IPs, ports, frp, services)
+#   status         Everything about the tunnel in one screen
+#   optimize       Recalculate the best MTU + TTL right now
+#   test           Connectivity checks (tunnel, control port, tunnelled ports)
+#   ports          add | remove | set | list  the tunnelled ports
+#   frp            update | version   (always the latest upstream release)
+#   restart        Restart the tunnel and the frp service
+#   logs           Show the tunnel / frp logs
+#   config         Print the active configuration
+#   export-peer    Write the peer server's frp config to a file
+#   firewall       Apply / show / remove the ACCEPT rules
+#   uninstall      Remove everything this tool installed
+#   help           This help
+#
+#   service-up     (internal, used by systemd)
+#   service-down   (internal, used by systemd)
+# ============================================================
+
+set -u
+
+# ------------------------------------------------------------
+# Locate ourselves (following the /usr/local/bin symlink)
+# ------------------------------------------------------------
+_gft_self="${BASH_SOURCE[0]}"
+while [ -h "$_gft_self" ]; do
+  _gft_dir="$(cd -P "$(dirname "$_gft_self")" && pwd)"
+  _gft_self="$(readlink "$_gft_self")"
+  case "$_gft_self" in
+    /*) ;;
+    *) _gft_self="$_gft_dir/$_gft_self" ;;
+  esac
+done
+GRE_FRP_SELF_DIR="${GRE_FRP_SELF_DIR:-$(cd -P "$(dirname "$_gft_self")" && pwd)}"
+export GRE_FRP_SELF_DIR
+GRE_FRP_CLI_PATH="${GRE_FRP_CLI_PATH:-${GRE_FRP_BIN_DIR:-/usr/local/bin}/gre-frp-tunnel}"
+export GRE_FRP_CLI_PATH
+
+GRE_FRP_LIB_DIR="${GRE_FRP_LIB_DIR:-$GRE_FRP_SELF_DIR/lib}"
+
+# shellcheck source=lib/common.sh
+. "$GRE_FRP_LIB_DIR/common.sh"
+# shellcheck source=lib/prereq.sh
+. "$GRE_FRP_LIB_DIR/prereq.sh"
+# shellcheck source=lib/net.sh
+. "$GRE_FRP_LIB_DIR/net.sh"
+# shellcheck source=lib/frp.sh
+. "$GRE_FRP_LIB_DIR/frp.sh"
+# shellcheck source=lib/firewall.sh
+. "$GRE_FRP_LIB_DIR/firewall.sh"
+# shellcheck source=lib/units.sh
+. "$GRE_FRP_LIB_DIR/units.sh"
+
+gre_frp_logfile_init
+gre_frp_lock_init
+
+VERSION="$(cat "$GRE_FRP_SELF_DIR/VERSION" 2>/dev/null || echo dev)"
+
+# ------------------------------------------------------------
+# Options
+# ------------------------------------------------------------
+GRE_FRP_ASSUME_YES=0
+GRE_FRP_QUIET=0
+PARSE_REST=()
+
+# Fills PARSE_REST with the positional arguments. It deliberately does not
+# echo them: a command substitution would run in a subshell and the
+# GRE_FRP_ROLE / GRE_FRP_PORTS assignments made here would be lost.
+parse_opts() {
+  local a
+  PARSE_REST=()
+  for a in "$@"; do
+    case "$a" in
+      --yes|-y)            GRE_FRP_ASSUME_YES=1; export GRE_FRP_ASSUME_YES ;;
+      --quiet|-q)          GRE_FRP_QUIET=1 ;;
+      --dry-run)           GRE_FRP_DRY_RUN=1 ;;
+      --non-interactive)   GRE_FRP_NONINTERACTIVE=1 ;;
+      --role=*)            GRE_FRP_ROLE="${a#*=}" ;;
+      --peer=*)            GRE_FRP_PEER_PUBLIC="${a#*=}" ;;
+      --local-ip=*)        GRE_FRP_LOCAL_PUBLIC="${a#*=}" ;;
+      --ports=*)           GRE_FRP_PORTS="${a#*=}" ;;
+      -h|--help)           PARSE_REST+=(help) ;;
+      *)                   PARSE_REST+=("$a") ;;
+    esac
+  done
+  return 0
+}
+
+# when running under systemd, keep the output out of the journal noise
+quiet_output_guard() {
+  [ "$GRE_FRP_QUIET" = "1" ] || return 0
+  mkdir -p "$GRE_FRP_LOG_DIR" 2>/dev/null || true
+  exec >>"$GRE_FRP_LOG_FILE" 2>&1
+}
+
+# ------------------------------------------------------------
+# Setup wizard
+# ------------------------------------------------------------
+setup_collect() {
+  local detected="" role="${GRE_FRP_ROLE:-}" local_ip peer_ip gre_local gre_remote
+  local ctrl ports target_ip idx
+
+  if [ -z "$role" ]; then
+    if ! gre_frp_interactive; then
+      die "non-interactive mode needs GRE_FRP_ROLE=iran|foreign (or --role=)"
+    fi
+    idx="$(menu "Which server are you installing on?" \
+      "Iran server (relay — VPN clients connect to this IP)" \
+      "Foreign server (hosts the VPN panel)")"
+    [ "$idx" = "-1" ] && return 1
+    [ "$idx" = "0" ] && role="iran" || role="foreign"
+  fi
+  case "$role" in
+    iran|foreign) ;;
+    *) die "role must be 'iran' or 'foreign' (got: $role)" ;;
+  esac
+  GRE_FRP_ROLE="$role"
+
+  step "Detecting the public IP"
+  detected="$(net_public_ip_detect || true)"
+  [ -n "$detected" ] && ok "detected: ${C_BOLD}${detected}${C_0}" \
+                     || warn "could not detect the public IP automatically"
+
+  local_ip="${GRE_FRP_LOCAL_PUBLIC:-}"
+  if [ -z "$local_ip" ] && gre_frp_interactive; then
+    if [ -n "$detected" ] && confirm "Is ${C_BOLD}${detected}${C_0} this server's public IP? [Y/n]" y; then
+      local_ip="$detected"
+    fi
+    if [ -z "$local_ip" ]; then
+      prompt local_ip "Enter this server's public IP" "$detected" is_ipv4
+    fi
+  fi
+  [ -n "$local_ip" ] || die "no public IP given"
+  is_ipv4 "$local_ip" || die "not a valid IPv4 address: $local_ip"
+  if net_ip_is_local "$local_ip"; then
+    ok "public IP $local_ip is on this machine"
+  else
+    warn "public IP $local_ip is not configured on any interface here (NAT? VPN? typo?)"
+    if gre_frp_interactive && ! confirm "Continue anyway?" y; then
+      return 1
+    fi
+  fi
+
+  peer_ip="${GRE_FRP_PEER_PUBLIC:-}"
+  if [ -z "$peer_ip" ]; then
+    gre_frp_interactive || die "non-interactive mode needs the peer IP (GRE_FRP_PEER_PUBLIC or --peer=)"
+    prompt peer_ip "Enter the ${C_BOLD}OTHER${C_0} server's public IP" "" is_ipv4
+  fi
+  is_ipv4 "$peer_ip" || die "not a valid IPv4 address: $peer_ip"
+  [ "$peer_ip" != "$local_ip" ] || die "the peer IP is the same as this server's IP"
+
+  if [ "$role" = "iran" ]; then
+    gre_local="${GRE_FRP_GRE_LOCAL:-$GRE_FRP_DEFAULT_GRE_IP_IRAN}"
+    gre_remote="${GRE_FRP_GRE_REMOTE:-$GRE_FRP_DEFAULT_GRE_IP_FOREIGN}"
+  else
+    gre_local="${GRE_FRP_GRE_LOCAL:-$GRE_FRP_DEFAULT_GRE_IP_FOREIGN}"
+    gre_remote="${GRE_FRP_GRE_REMOTE:-$GRE_FRP_DEFAULT_GRE_IP_IRAN}"
+  fi
+  if gre_frp_interactive; then
+    prompt gre_local "Tunnel IP for ${C_BOLD}this${C_0} server" "$gre_local" is_ipv4
+    prompt gre_remote "Tunnel IP for the ${C_BOLD}peer${C_0}" "$gre_remote" is_ipv4
+  fi
+  is_ipv4 "$gre_local" || die "invalid tunnel IP: $gre_local"
+  is_ipv4 "$gre_remote" || die "invalid tunnel IP: $gre_remote"
+  [ "$gre_local" != "$gre_remote" ] || die "the two tunnel IPs must differ"
+
+  ctrl="${GRE_FRP_CTRL_PORT:-$GRE_FRP_DEFAULT_CTRL_PORT}"
+  if gre_frp_interactive; then
+    prompt ctrl "FRP control port (inside the tunnel)" "$ctrl" is_port
+  fi
+  is_port "$ctrl" || die "invalid control port: $ctrl"
+
+  target_ip="${GRE_FRP_LOCAL_TARGET_IP:-127.0.0.1}"
+  if [ "$role" = "foreign" ] && gre_frp_interactive; then
+    prompt target_ip "Local address the panel listens on" "$target_ip" is_ipv4
+  fi
+  is_ipv4 "$target_ip" || die "invalid local target address: $target_ip"
+
+  step "Ports to tunnel (TCP + UDP)"
+  ports="${GRE_FRP_PORTS:-}"
+  if [ -z "$ports" ]; then
+    gre_frp_interactive || die "non-interactive mode needs the port list (GRE_FRP_PORTS or --ports=)"
+    dim "  examples:  443        8443,2053        2000-2010,443"
+    prompt ports "Ports to expose on the Iranian IP" "443" ports_validate
+  fi
+  ports_validate "$ports" || die "invalid port list: $ports"
+  ports="$(ports_list_csv "$ports")"
+
+  local clash; clash="$(ports_ssh_conflict "$ports")"
+  if [ -n "$clash" ]; then
+    err "these ports would hijack SSH on the Iranian server: ${clash}"
+    if [ "${GRE_FRP_ALLOW_SSH_PORT:-0}" != "1" ]; then
+      die "pick different ports (or set GRE_FRP_ALLOW_SSH_PORT=1 to override — it can lock you out)"
+    fi
+    warn "GRE_FRP_ALLOW_SSH_PORT=1 — continuing even though SSH may be shadowed"
+  fi
+
+  GRE_FRP_CFG_ROLE="$role"
+  GRE_FRP_CFG_LOCAL="$local_ip"
+  GRE_FRP_CFG_PEER="$peer_ip"
+  GRE_FRP_CFG_GRE_LOCAL="$gre_local"
+  GRE_FRP_CFG_GRE_REMOTE="$gre_remote"
+  GRE_FRP_CFG_CTRL="$ctrl"
+  GRE_FRP_CFG_PORTS="$ports"
+  GRE_FRP_CFG_TARGET="$target_ip"
+
+  hr
+  printf '  role              : %s%s%s\n' "$C_BOLD" "$role" "$C_0"
+  printf '  this server IP    : %s\n' "$local_ip"
+  printf '  peer server IP    : %s\n' "$peer_ip"
+  printf '  tunnel IPs        : %s ⇄ %s\n' "$gre_local" "$gre_remote"
+  printf '  control port      : %s/tcp (inside the tunnel)\n' "$ctrl"
+  printf '  tunnelled ports   : %s  (%s ports × TCP+UDP)\n' "$ports" "$(ports_count "$ports")"
+  [ "$role" = "foreign" ] && printf '  panel on          : %s\n' "$target_ip"
+  hr
+
+  if gre_frp_interactive && [ "$GRE_FRP_ASSUME_YES" != "1" ]; then
+    confirm "Apply this configuration?" y || { warn "aborted"; return 1; }
+  fi
+  return 0
+}
+
+setup_apply() {
+  step "Writing configuration"
+  cfg_set ROLE "$GRE_FRP_CFG_ROLE"
+  cfg_set LOCAL_PUBLIC_IP "$GRE_FRP_CFG_LOCAL"
+  cfg_set PEER_PUBLIC_IP "$GRE_FRP_CFG_PEER"
+  cfg_set GRE_IP_LOCAL "$GRE_FRP_CFG_GRE_LOCAL"
+  cfg_set GRE_IP_REMOTE "$GRE_FRP_CFG_GRE_REMOTE"
+  cfg_set GRE_PREFIX "$(cfg_get GRE_PREFIX 30)"
+  cfg_set CTRL_PORT "$GRE_FRP_CFG_CTRL"
+  cfg_set TUNNEL_PORTS "$GRE_FRP_CFG_PORTS"
+  cfg_set LOCAL_TARGET_IP "$GRE_FRP_CFG_TARGET"
+  cfg_set TUN_DEV "$GRE_FRP_TUN_DEV"
+  frp_token_resolve >/dev/null
+  cfg_set TUNNEL_MTU "$(cfg_get TUNNEL_MTU "$GRE_FRP_DEFAULT_MTU")"
+  cfg_set TUNNEL_TTL "$(cfg_get TUNNEL_TTL "$GRE_FRP_DEFAULT_TTL")"
+  ok "saved $GRE_FRP_STATE_FILE"
+
+  sysctl_setup
+  step "Bringing up the GRE tunnel"
+  gre_ensure_up || warn "the GRE device could not be created yet"
+
+  step "Looking for the best MTU and TTL"
+  if gre_peer_reachable; then
+    net_optimize_all || warn "autotuning did not complete"
+  else
+    warn "the peer does not answer on ${GRE_FRP_CFG_GRE_REMOTE} yet —"
+    warn "that is expected while the other server is not configured."
+    warn "keeping MTU=$(cfg_get TUNNEL_MTU) / TTL=$(cfg_get TUNNEL_TTL) for now;"
+    warn "the hourly optimizer will tune both as soon as the link is up."
+  fi
+  frp_udp_packet_size_lock_in >/dev/null
+  dim "UDP packet size fixed at $(frp_udp_packet_size) bytes (same on both servers)"
+
+  step "Firewall"
+  fw_report_backend
+  fw_apply || warn "firewall rules could not be applied"
+
+  step "Installing the latest frp"
+  frp_install_latest || warn "frp installation failed — the tunnel is up, only frp is missing"
+
+  step "Generating frp configuration"
+  frp_config_write
+
+  step "Installing systemd services"
+  units_install
+  units_reload || true
+  units_enable
+
+  step "Starting services"
+  services_start_verified || true
+
+  step "Result"
+  cmd_status || true
+  printf '\n'
+  ok "done — this server is configured as the ${C_BOLD}${GRE_FRP_CFG_ROLE}${C_0} side."
+  if [ "$GRE_FRP_CFG_ROLE" = "iran" ]; then
+    info "Now run this script on the FOREIGN server (${GRE_FRP_CFG_PEER}) with the same port list:"
+  else
+    info "Now run this script on the IRANIAN server (${GRE_FRP_CFG_PEER}) with the same port list:"
+  fi
+  dim "     GRE_FRP_PORTS=\"$GRE_FRP_CFG_PORTS\" ./install.sh"
+  if [ "$GRE_FRP_CFG_ROLE" = "iran" ]; then
+    info "Client (VPN) configs must point at THIS server's IP: ${C_BOLD}${GRE_FRP_CFG_LOCAL}${C_0}"
+  else
+    info "Client (VPN) configs must point at the IRANIAN IP: ${C_BOLD}${GRE_FRP_CFG_PEER}${C_0}"
+  fi
+  return 0
+}
+
+cmd_install() {
+  require_root "install"
+  banner
+  hr
+  prereq_install || die "prerequisites could not be installed"
+  setup_collect || return 1
+  setup_apply
+}
+
+# ------------------------------------------------------------
+# Status
+# ------------------------------------------------------------
+cmd_status() {
+  local role dev mtu ttl ports
+  role="$(cfg_get ROLE)"
+  if [ -z "$role" ]; then
+    warn "not configured yet — run: sudo $GRE_FRP_CLI_NAME install"
+    return 1
+  fi
+  dev="$(cfg_get TUN_DEV "$GRE_FRP_TUN_DEV")"
+  mtu="$(cfg_get TUNNEL_MTU "$GRE_FRP_DEFAULT_MTU")"
+  ttl="$(cfg_get TUNNEL_TTL "$GRE_FRP_DEFAULT_TTL")"
+  ports="$(cfg_get TUNNEL_PORTS)"
+
+  hr
+  printf ' %s%s%s\n' "$C_BOLD" "$GRE_FRP_APP_NAME v$VERSION" "$C_0"
+  hr
+  printf '  role             : %s\n' "$role"
+  printf '  this server      : %s\n' "$(cfg_get LOCAL_PUBLIC_IP)"
+  printf '  peer server      : %s\n' "$(cfg_get PEER_PUBLIC_IP)"
+  printf '  tunnel IPs       : %s (local) ⇄ %s (peer)\n' "$(cfg_get GRE_IP_LOCAL)" "$(cfg_get GRE_IP_REMOTE)"
+  printf '  device           : %s\n' "$dev"
+
+  if gre_dev_exists; then
+    printf '  link             : %sup%s  mtu=%s ttl=%s\n' "$C_G" "$C_0" "$mtu" "$ttl"
+  else
+    printf '  link             : %sdown%s\n' "$C_R" "$C_0"
+  fi
+
+  local out replies loss
+  out="$(net_ping_host "$(cfg_get GRE_IP_REMOTE)" 4 2)"
+  replies="${out%% *}"; loss="${out##* }"
+  if [ "${replies:-0}" -gt 0 ]; then
+    printf '  peer over tunnel : %s✔%s %s/4 replies (loss %s%%)\n' "$C_G" "$C_0" "$replies" "$loss"
+  else
+    printf '  peer over tunnel : %s✘ no reply%s\n' "$C_R" "$C_0"
+  fi
+
+  printf '  autotune mtu     : %s (loss %s%%, updated %s)\n' \
+    "$(cfg_get TUNNEL_MTU_UPDATED never)" "$(cfg_get TUNNEL_MTU_LOSS '-')"
+  printf '  autotune ttl     : %s (loss %s%%, hops %s, updated %s)\n' \
+    "$(cfg_get TUNNEL_TTL_UPDATED never)" "$(cfg_get TUNNEL_TTL_LOSS '-')" "$(cfg_get TUNNEL_TTL_HOPS '?')"
+  printf '  ports (TCP+UDP)  : %s  (%s ports)\n' "${ports:-none}" "$(ports_count "$ports")"
+  printf '  frp version      : %s\n' "$(frp_installed_version || echo 'not installed')"
+  printf '  udp packet size  : %s bytes\n' "$(frp_udp_packet_size)"
+  printf '  auth token       : %s\n' "$(cfg_get AUTH_TOKEN | cut -c1-6)…"
+  hr
+  services_status
+  hr
+  return 0
+}
+
+# ------------------------------------------------------------
+# Optimize
+# ------------------------------------------------------------
+cmd_optimize() {
+  require_root "optimize"
+  if ! cfg_is_set ROLE; then
+    err "not configured yet — run: sudo $GRE_FRP_CLI_NAME install"
+    return 1
+  fi
+  step "Watchdog"
+  net_watchdog || warn "watchdog could not recover the link"
+  net_optimize_all || return 1
+  ok "MTU $(cfg_get TUNNEL_MTU) / TTL $(cfg_get TUNNEL_TTL) applied"
+  return 0
+}
+
+# ------------------------------------------------------------
+# Test
+# ------------------------------------------------------------
+cmd_test() {
+  local fails=0 role ports p peer_gre
+  role="$(cfg_get ROLE)"
+  [ -n "$role" ] || { err "not configured"; return 1; }
+  ports="$(cfg_get TUNNEL_PORTS)"
+  peer_gre="$(cfg_get GRE_IP_REMOTE)"
+
+  hr; step "Connectivity test"; hr
+
+  # 1. device
+  if gre_dev_exists; then ok "GRE device $(cfg_get TUN_DEV) exists"
+  else err "GRE device is missing"; fails=$(( fails + 1 )); fi
+
+  # 2. unit
+  if is_systemd; then
+    if service_active gre-frp-tunnel.service; then ok "gre-frp-tunnel.service is active"
+    else warn "gre-frp-tunnel.service is not active"; fi
+  fi
+
+  # 3. peer over the tunnel
+  local out replies loss
+  out="$(net_ping_host "$peer_gre" 5 2)"; replies="${out%% *}"; loss="${out##* }"
+  if [ "${replies:-0}" -gt 0 ]; then
+    ok "peer $peer_gre answers over the tunnel (loss ${loss}%)"
+  else
+    err "peer $peer_gre does not answer over the tunnel"
+    fails=$(( fails + 1 ))
+  fi
+
+  # 4. fragmentation check at the configured MTU
+  local mtu payload
+  mtu="$(cfg_get TUNNEL_MTU "$GRE_FRP_DEFAULT_MTU")"
+  payload=$(( mtu - 28 ))
+  if net_probe_payload "$peer_gre" "$payload" 2; then
+    ok "no fragmentation at mtu $mtu (payload $payload clean)"
+  else
+    warn "payload $payload did not go through — the optimizer will lower the MTU"
+  fi
+
+  # 5. control port
+  local ctrl
+  ctrl="$(cfg_get CTRL_PORT "$GRE_FRP_DEFAULT_CTRL_PORT")"
+  if [ "$role" = "foreign" ]; then
+    if net_tcp_check "$(cfg_get GRE_IP_REMOTE)" "$ctrl" 3; then
+      ok "frp control port $ctrl reachable on the Iran side"
+    else
+      err "frp control port $ctrl is NOT reachable on $(cfg_get GRE_IP_REMOTE)"
+      fails=$(( fails + 1 ))
+    fi
+    if is_systemd && service_active frpc.service; then ok "frpc.service is running"
+    else warn "frpc.service is not running"; fi
+  else
+    if is_systemd && service_active frps.service; then ok "frps.service is running"
+    else warn "frps.service is not running"; fi
+    if have ss && ss -ltn 2>/dev/null | grep -q ":$ctrl "; then
+      ok "frps is listening on $ctrl"
+    else
+      warn "nothing is listening on $ctrl (yet)"
+    fi
+    for p in $(ports_parse "$ports" 2>/dev/null | head -5); do
+      if have ss && ss -ltn 2>/dev/null | grep -q ":$p "; then
+        ok "TCP $p is open on the Iranian IP"
+      else
+        warn "TCP $p is not listening on this server"
+      fi
+    done
+  fi
+
+  # 6. local target
+  if [ "$role" = "foreign" ]; then
+    local target; target="$(cfg_get LOCAL_TARGET_IP 127.0.0.1)"
+    if have ss && ss -ltn 2>/dev/null | grep -q ":$(ports_parse "$ports" 2>/dev/null | head -1) "; then
+      ok "the panel seems to listen on $target"
+    else
+      warn "nothing is listening on the first tunnelled port at $target"
+    fi
+  fi
+
+  hr
+  if [ "$fails" -eq 0 ]; then ok "all required checks passed"; return 0; fi
+  err "$fails check(s) failed"
+  return 1
+}
+
+# ------------------------------------------------------------
+# Ports / frp / misc commands
+# ------------------------------------------------------------
+cmd_ports() {
+  local action="${1:-list}"; shift || true
+  require_root "ports"
+  cfg_is_set ROLE || { err "not configured"; return 1; }
+  local current spec newp clash
+  current="$(cfg_get TUNNEL_PORTS)"
+
+  case "$action" in
+    list)
+      printf 'tunnelled ports (%s):\n' "$(ports_count "$current")"
+      for p in $(ports_parse "$current" 2>/dev/null); do printf '  %s/tcp + %s/udp\n' "$p" "$p"; done
+      ;;
+    add|remove|set)
+      spec="$*"
+      if [ -z "$spec" ]; then
+        gre_frp_interactive || die "usage: $GRE_FRP_CLI_NAME ports $action <ports>"
+        prompt spec "Ports (comma separated, ranges with -)" "$current" ports_validate
+      fi
+      ports_validate "$spec" || die "invalid port list: $spec"
+      case "$action" in
+        set)    newp="$(ports_list_csv "$spec")" ;;
+        add)
+          if [ -n "$current" ]; then
+            newp="$(ports_list_csv "$current,$spec")"
+          else
+            newp="$(ports_list_csv "$spec")"
+          fi
+          ;;
+        remove)
+          newp="$({ ports_parse "$current"; ports_parse "$spec"; } | sort -n | uniq -u | paste -sd, -)"
+          ;;
+      esac
+      [ -n "$newp" ] || die "that would leave no ports at all"
+      clash="$(ports_ssh_conflict "$newp")"
+      [ -n "$clash" ] && [ "${GRE_FRP_ALLOW_SSH_PORT:-0}" != "1" ] \
+        && die "refusing: port(s) ${clash} are used by SSH"
+      cfg_set TUNNEL_PORTS "$newp"
+      ok "ports updated: $newp"
+      frp_config_write
+      fw_apply || true
+      services_restart_role || true
+      ;;
+    *) die "usage: $GRE_FRP_CLI_NAME ports {list|add|remove|set}" ;;
+  esac
+}
+
+cmd_frp() {
+  local action="${1:-version}"
+  case "$action" in
+    version)
+      printf 'installed: %s\n' "$(frp_installed_version || echo none)"
+      printf 'latest   : %s\n' "$(frp_version_of "$(frp_latest_tag 2>/dev/null)" 2>/dev/null || echo unknown)"
+      ;;
+    update) cmd_update_frp ;;
+    token)  frp_token_resolve; printf '\n' ;;
+    *) die "usage: $GRE_FRP_CLI_NAME frp {version|update|token}" ;;
+  esac
+}
+
+cmd_update_frp() {
+  require_root "update-frp"
+  frp_update_if_needed || return 1
+  frp_config_write
+  services_restart_role || true
+  ok "frp service restarted"
+}
+
+cmd_restart() {
+  require_root "restart"
+  gre_ensure_up || warn "GRE device problem"
+  frp_config_write
+  fw_apply || true
+  services_restart_role || true
+  is_systemd && sleep 2 && services_start_verified || true
+}
+
+cmd_logs() {
+  local n="${1:-40}"
+  hr; printf ' %s\n' "$GRE_FRP_LOG_FILE"; hr
+  [ -f "$GRE_FRP_LOG_FILE" ] && tail -n "$n" "$GRE_FRP_LOG_FILE"
+  hr; printf ' %s\n' "$GRE_FRP_OPT_LOG"; hr
+  [ -f "$GRE_FRP_OPT_LOG" ] && tail -n "$n" "$GRE_FRP_OPT_LOG"
+  hr; printf ' frps/frpc (journal)\n'; hr
+  if is_systemd; then
+    journalctl -u frps.service -u frpc.service -n "$n" --no-pager 2>/dev/null || true
+  fi
+}
+
+cmd_config() {
+  hr; printf ' configuration: %s\n' "$GRE_FRP_STATE_FILE"; hr
+  [ -f "$GRE_FRP_STATE_FILE" ] && cat "$GRE_FRP_STATE_FILE"
+  hr; printf ' frp: %s\n' "$GRE_FRP_FRP_ETC_DIR"; hr
+  local f
+  for f in "$GRE_FRP_FRP_ETC_DIR"/frps.toml "$GRE_FRP_FRP_ETC_DIR"/frpc.toml; do
+    [ -f "$f" ] && { printf '\n# ---- %s ----\n' "$f"; cat "$f"; }
+  done
+  hr
+}
+
+cmd_export_peer() {
+  require_root "export-peer"
+  local out
+  out="$(frp_config_write_peer_copy)"
+  if [ -f "$out" ]; then
+    ok "peer configuration written to $out"
+    dim "  copy it to the other server as /etc/frp/$( [ "$(cfg_get ROLE)" = "iran" ] && echo frpc.toml || echo frps.toml )"
+  else
+    warn "nothing was written"
+  fi
+}
+
+cmd_firewall() {
+  local action="${1:-apply}"
+  require_root "firewall"
+  case "$action" in
+    apply)  fw_report_backend; fw_apply ;;
+    show|status) fw_status ;;
+    remove) fw_remove ;;
+    *) die "usage: $GRE_FRP_CLI_NAME firewall {apply|show|remove}" ;;
+  esac
+}
+
+cmd_uninstall() {
+  require_root "uninstall"
+  gre_frp_interactive && ! confirm "Remove ${GRE_FRP_APP_NAME} completely?" n && return 1
+  fw_remove || true
+  units_remove || true
+  gre_destroy || true
+  sysctl_remove || true
+  local role; role="$(cfg_get ROLE)"
+  [ -n "$role" ] || role=iran
+  if [ "$role" = "iran" ]; then rm -f "$GRE_FRP_FRP_ETC_DIR/frps.toml" 2>/dev/null || true
+  else rm -f "$GRE_FRP_FRP_ETC_DIR/frpc.toml" 2>/dev/null || true; fi
+  [ "$GRE_FRP_DRY_RUN" = "1" ] || rm -rf "$GRE_FRP_STATE_DIR" 2>/dev/null || true
+  [ "$GRE_FRP_BIN_DIR/gre-frp-tunnel" = "$GRE_FRP_CLI_PATH" ] && \
+    [ "$GRE_FRP_DRY_RUN" != "1" ] && rm -f "$GRE_FRP_BIN_DIR/gre-frp-tunnel" "$GRE_FRP_BIN_DIR/gft" 2>/dev/null || true
+  ok "removed. frp binaries in $GRE_FRP_BIN_DIR were kept (delete them manually if you want)"
+  dim "  state dir: $GRE_FRP_STATE_DIR (removed)"
+}
+
+cmd_service_up() {
+  local rc=0
+  gre_ensure_up || rc=1
+  fw_apply || true
+  [ "$rc" = "0" ] && ok "GRE tunnel is up (mtu $(cfg_get TUNNEL_MTU) / ttl $(cfg_get TUNNEL_TTL))"
+  return "$rc"
+}
+
+cmd_service_down() {
+  gre_destroy || true
+  ok "GRE tunnel removed"
+}
+
+cmd_help() {
+  cat <<EOF
+${GRE_FRP_APP_NAME} v$VERSION
+
+  sudo $GRE_FRP_CLI_NAME                 open the menu
+  sudo $GRE_FRP_CLI_NAME install         guided setup (prerequisites, role, IPs, ports, frp)
+  sudo $GRE_FRP_CLI_NAME status          show the tunnel state
+  sudo $GRE_FRP_CLI_NAME test            connectivity checks
+  sudo $GRE_FRP_CLI_NAME optimize        recalculate the best MTU + TTL now
+  sudo $GRE_FRP_CLI_NAME ports add 8443  add tunnelled ports (TCP + UDP)
+  sudo $GRE_FRP_CLI_NAME frp update      install the latest frp release
+  sudo $GRE_FRP_CLI_NAME frp token       show the shared auth token
+  sudo $GRE_FRP_CLI_NAME restart         restart tunnel + frp
+  sudo $GRE_FRP_CLI_NAME logs            tail the logs
+  sudo $GRE_FRP_CLI_NAME config          print the active configuration
+  sudo $GRE_FRP_CLI_NAME export-peer     write the peer's frp config to a file
+  sudo $GRE_FRP_CLI_NAME firewall show   inspect the ACCEPT rules
+  sudo $GRE_FRP_CLI_NAME uninstall       remove everything
+
+Environment overrides (also used for unattended installs):
+  GRE_FRP_ROLE=iran|foreign      GRE_FRP_LOCAL_PUBLIC=1.2.3.4
+  GRE_FRP_PEER_PUBLIC=5.6.7.8    GRE_FRP_PORTS=443,2053
+  GRE_FRP_CTRL_PORT=7000         GRE_FRP_NONINTERACTIVE=1
+  GRE_FRP_DRY_RUN=1              (print everything, change nothing)
+EOF
+}
+
+cmd_menu() {
+  local idx last_choice
+  while :; do
+    clear 2>/dev/null || true
+    banner
+    cmd_status || true
+    printf '\n'
+    idx="$(menu "Choose an action" \
+      "Guided setup (install / reconfigure)" \
+      "Connectivity test" \
+      "Recalculate best MTU + TTL now" \
+      "Manage tunnelled ports" \
+      "Update frp to the latest release" \
+      "Restart everything" \
+      "Show logs" \
+      "Show configuration" \
+      "Firewall rules" \
+      "Export the peer's frp config" \
+      "Uninstall" \
+      "Quit")"
+    case "$idx" in
+      -1|11) printf '\n'; return 0 ;;
+      0) cmd_install ;;
+      1) cmd_test ;;
+      2) cmd_optimize ;;
+      3) read -r -p "ports (e.g. add 8443): " -a last_choice 2>/dev/null || last_choice=(list)
+         cmd_ports "${last_choice[@]:-list}" ;;
+      4) cmd_update_frp ;;
+      5) cmd_restart ;;
+      6) cmd_logs ;;
+      7) cmd_config ;;
+      8) cmd_firewall show ;;
+      9) cmd_export_peer ;;
+      10) cmd_uninstall ;;
+    esac
+    pause_enter
+  done
+}
+
+# ------------------------------------------------------------
+# Dispatch
+# ------------------------------------------------------------
+main() {
+  parse_opts "$@"
+  local cmd="menu"
+  if [ "${#PARSE_REST[@]}" -gt 0 ]; then
+    cmd="${PARSE_REST[0]}"
+    local -a rest=("${PARSE_REST[@]:1}")
+    # shellcheck disable=SC2048,SC2086
+    set -- ${rest[@]+"${rest[@]}"}
+  fi
+
+  case "$cmd" in
+    install)      cmd_install "$@" ;;
+    status)       cmd_status "$@" ;;
+    test)         cmd_test "$@" ;;
+    optimize|mtu) cmd_optimize "$@" ;;
+    ports)        cmd_ports "$@" ;;
+    frp)          cmd_frp "$@" ;;
+    update-frp)   cmd_update_frp "$@" ;;
+    restart|start) cmd_restart "$@" ;;
+    logs)         cmd_logs "$@" ;;
+    config)       cmd_config "$@" ;;
+    export-peer)  cmd_export_peer "$@" ;;
+    firewall|fw)  cmd_firewall "$@" ;;
+    uninstall|remove) cmd_uninstall "$@" ;;
+    service-up)   cmd_service_up "$@" ;;
+    service-down) cmd_service_down "$@" ;;
+    version|-v)   printf '%s v%s\n' "$GRE_FRP_APP_NAME" "$VERSION" ;;
+    help|-h|--help) cmd_help ;;
+    menu|"")      cmd_menu "$@" ;;
+    *)            err "unknown command: $cmd"; printf '\n'; cmd_help; exit 2 ;;
+  esac
+}
+
+quiet_output_guard
+main "$@"

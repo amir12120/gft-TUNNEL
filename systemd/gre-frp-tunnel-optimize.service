@@ -1,0 +1,12 @@
+[Unit]
+Description=GRE+FRP-TUNNEL — recalculate the best GRE MTU and TTL (minimise packet loss)
+Documentation=https://github.com/amir12120/GRE-FRP-TUNNEL
+After=gre-frp-tunnel.service network-online.target
+Requires=gre-frp-tunnel.service
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=__CLI__ optimize --quiet
+TimeoutStartSec=300
