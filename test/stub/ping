@@ -44,7 +44,7 @@ is_uint "$count" || count=1
 
 tunnel_mtu() {
   local m
-  m="$(grep -m1 "^devmtu gre-frp " "$S/ip.state" 2>/dev/null | awk '{print $3}')"
+  m="$(grep -m1 "^devmtu gft0 " "$S/ip.state" 2>/dev/null | awk '{print $3}')"
   is_uint "$m" || m=1472
   printf '%s' "$m"
 }
@@ -53,7 +53,7 @@ tunnel_mtu() {
 # from the ping flag, so that is what an in-tunnel probe depends on.
 dev_ttl() {
   local t
-  t="$(grep -m1 "^devttl gre-frp " "$S/ip.state" 2>/dev/null | awk '{print $3}')"
+  t="$(grep -m1 "^devttl gft0 " "$S/ip.state" 2>/dev/null | awk '{print $3}')"
   is_uint "$t" || t=64
   printf '%s' "$t"
 }

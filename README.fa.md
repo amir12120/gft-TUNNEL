@@ -1,7 +1,8 @@
-# GRE+FRP-TUNNEL
+# gft-TUNNEL
 
-یک نصب‌کنندهٔ تک‌اسکریپتی bash برای ساخت **تانل GRE + تانل معکوس FRP** بین
-**سرور ایران** و **سرور خارج** که پنل VPN روی آن قرار دارد.
+یک نصب‌کنندهٔ تک‌اسکریپتی bash **و** یک مدیر تعاملی برای ساخت
+**تانل GRE + تانل معکوس FRP** بین **سرور ایران** و **سرور خارج** که پنل VPN
+روی آن قرار دارد.
 
 هدف: کلاینت‌های VPN به **آی‌پی ایران** وصل می‌شوند (پینگ کمتر و در دسترس از
 تمام اپراتورهای ایران) ولی خود پنل روی سرور خارج می‌ماند.
@@ -26,6 +27,8 @@
 - نسخهٔ `frp` همیشه **آخرین ریلیز** مخزن
   [fatedier/frp](https://github.com/fatedier/frp) است (با بررسی SHA-256) و یک
   تایمر روزانه آن را به‌روز نگه می‌دارد.
+- همه‌چیز با یک دستور، **`gft`**، کنترل می‌شود که بعد از نصب منوی تمام‌صفحه را
+  باز می‌کند.
 
 ---
 
@@ -34,14 +37,14 @@
 روی **هر دو سرور** (ترتیب مهم نیست، روی هر سرور جدا اجرا کنید):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/amir12120/GRE-FRP-TUNNEL/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/amir12120/gft-TUNNEL/main/install.sh | sudo bash
 ```
 
 یا از روی سورس:
 
 ```bash
-git clone https://github.com/amir12120/GRE-FRP-TUNNEL.git
-cd GRE-FRP-TUNNEL && sudo ./install.sh
+git clone https://github.com/amir12120/gft-TUNNEL.git
+cd gft-TUNNEL && sudo ./install.sh
 ```
 
 اسکریپت به ترتیب:
@@ -52,16 +55,19 @@ cd GRE-FRP-TUNNEL && sudo ./install.sh
 ۳. آی‌پی عمومی را شناسایی می‌کند و می‌پرسد «آیا آی‌پی سرور شما این است؟» و اگر
    نبود آی‌پی درست را از شما می‌گیرد،
 ۴. آی‌پی سرور **مقابل** را می‌پرسد،
-۵. تانل GRE پایدار می‌سازد و بهترین MTU و TTL را حساب می‌کند،
-۶. آخرین نسخهٔ frp را نصب و کانفیگ هر دو سمت را می‌نویسد،
-۷. پورت‌های موردنظر را می‌پرسد و فقط همان‌ها را TCP + UDP باز می‌کند،
-۸. سرویس‌ها و تایمرهای systemd را نصب و راه‌اندازی می‌کند.
+۵. **پورت پیش‌فرض تانل (کنترل) یعنی `40001`** را نشان می‌دهد و می‌پرسد که
+   نگهش دارید یا عوضش کنید،
+۶. پورت‌هایی که می‌خواهید تانل شوند را می‌پرسد — **همه را یک‌جا و با کاما جدا
+   کنید** (مثل `443,8443,2053`) — و فقط همان‌ها را TCP + UDP باز می‌کند،
+۷. تانل GRE پایدار را می‌سازد و بهترین MTU و TTL را حساب می‌کند،
+۸. آخرین نسخهٔ frp را نصب، کانفیگ هر دو سمت را می‌نویسد، سرویس‌ها و تایمرهای
+   systemd را نصب و راه‌اندازی می‌کند و **شما را داخل منو می‌برد**.
 
 اجرای بدون سؤال (مناسب نصب خودکار):
 
 ```bash
-GRE_FRP_ROLE=iran    GRE_FRP_PORTS="443,2053" sudo -E ./install.sh
-GRE_FRP_ROLE=foreign GRE_FRP_PORTS="443,2053" sudo -E ./install.sh
+GFT_ROLE=iran    GFT_PORTS="443,2053" sudo -E ./install.sh
+GFT_ROLE=foreign GFT_PORTS="443,2053" sudo -E ./install.sh
 ```
 
 > **کانفیگ کلاینت‌ها باید آی‌پی ایران را داشته باشد** — اصل ماجرا همین است.
@@ -69,19 +75,79 @@ GRE_FRP_ROLE=foreign GRE_FRP_PORTS="443,2053" sudo -E ./install.sh
 
 ---
 
+## منوی `gft`
+
+بعد از نصب، اجرای `gft` منوی تمام‌صفحه را باز می‌کند (با کلیدهای جهت و Enter،
+یا اگر ورودی ترمینال نباشد با تایپ شماره):
+
+```
+  نصب / تنظیم مجدد این سرور               وضعیت
+  ویرایش تنظیمات تانل                     به‌روزرسانی gft-TUNNEL از گیت‌هاب
+  تغییر پورت تانل                         به‌روزرسانی frp به آخرین نسخه
+  مدیریت پورت‌های تانل                    ری‌استارت تانل و frp
+  محاسبهٔ مجدد بهترین MTU + TTL            نمایش لاگ‌ها
+  تست اتصال                               نمایش کانفیگ
+                                          قواعد فایروال
+                                          خروجی گرفتن از کانفیگ سمت مقابل
+                                          حذف کامل
+                                          خروج
+```
+
+سر‌صفحه همیشه نقش، آی‌پی عمومی هر دو سرور، آی‌پی‌های تانل، پورت تانل، وضعیت
+لینک، MTU/TTL، پورت‌های تانل، نسخهٔ frp و وضعیت سرویس را نشان می‌دهد — این اطلاعات
+فقط از فایل وضعیت خوانده می‌شوند، پس باز کردن منو هزینه‌ای ندارد.
+
+### تغییر تنظیمات — از جمله آی‌پی سرور مقابل
+
+تانل بعد از نصب کاملاً قابل ویرایش است، هم از منو و هم از خط فرمان. کاربرد
+مهم: **روی سرور خارج، تانل را به آی‌پی جدید ایران وصل کنید.**
+
+```bash
+sudo gft set                       # انتخاب تعاملی همهٔ تنظیمات
+sudo gft edit                      # همان انتخاب (گزینهٔ «ویرایش تنظیمات تانل»)
+sudo gft set peer-ip 1.2.3.4       # آی‌پی عمومی سرور مقابل (لینک بازسازی می‌شود)
+sudo gft set local-ip 5.6.7.8      # آی‌پی عمومی خود همین سرور
+sudo gft set gre-remote 10.99.99.9 # آی‌پی تانل سرور مقابل
+sudo gft set tunnel-port 41000     # پورت تانل (کنترل)، پیش‌فرض ۴۰۰۰۱
+sudo gft set ports 443,8443,2053   # جایگزینی کل لیست پورت‌های تانل (یک‌جا)
+sudo gft set target 10.77.0.5      # آدرس پنل روی همین سرور
+sudo gft set mtu 1400              # تعیین دستی MTU
+sudo gft set ttl 64                # تعیین دستی TTL
+```
+
+`gft set <key> <value>` مقدار را اعتبارسنجی می‌کند، هر چیزی که تانل را خراب کند
+را رد می‌کند (کلید ناشناخته، آی‌پی سرور مقابل برابر آی‌پی خودتان، یکسان بودن دو
+آی‌پی تانل، پورت SSH بدون اجازهٔ صریح) و تغییر را روی سیستم اعمال و همه‌چیز را
+هم‌خوان نگه می‌دارد: لینک GRE را بازمی‌سازد، کانفیگ frp را بازنویسی می‌کند،
+فایروال و کلمپ MSS را دوباره اعمال می‌کند، MTU/TTL را دوباره تنظیم می‌کند و
+سرویس‌ها را ری‌استارت می‌کند — همه در یک مرحله.
+
+### به‌روزرسانی
+
+```bash
+sudo gft update            # دریافت جدیدترین gft-TUNNEL و نصب مجدد یونیت‌ها
+sudo gft update --force    # نادیده گرفتن ویرایش‌های محلی (به‌صورت پیش‌فرض محفوظ‌اند)
+sudo gft frp update        # نصب آخرین نسخهٔ frp
+```
+
+---
+
 ## چه چیزی روی هر سرور نصب می‌شود
 
 | | ایران (رله) | خارج (پنل) |
 |---|---|---|
-| دستگاه GRE | `gre-frp` و `10.99.99.1/30` | `gre-frp` و `10.99.99.2/30` |
-| نقش frp | `frps` روی `10.99.99.1:7000` | `frpc` به سمت `10.99.99.1:7000` |
+| دستگاه GRE | `gft0` و `10.99.99.1/30` | `gft0` و `10.99.99.2/30` |
+| نقش frp | `frps` روی `10.99.99.1:40001` | `frpc` به سمت `10.99.99.1:40001` |
 | پورت عمومی باز | همان پورت‌های تانل، TCP+UDP | هیچ (هدف `127.0.0.1` است) |
 | کانفیگ | `/etc/frp/frps.toml` | `/etc/frp/frpc.toml` |
-| وضعیت | `/etc/gre-frp-tunnel/config.env` | همان |
+| وضعیت | `/etc/gft-tunnel/config.env` | همان |
+
+**پورت پیش‌فرض تانل (کنترل) `40001` است** و هم در زمان نصب، هم هر وقت خواستید با
+`gft set tunnel-port` یا `gft tunnel-port` قابل تغییر است.
 
 مسیرهای دیگر: باینری‌ها در `/usr/local/bin`، یونیت‌ها در
-`/etc/systemd/system`، لاگ‌ها در `/var/log/gre-frp-tunnel` و فایل sysctl در
-`/etc/sysctl.d/99-gre-frp-tunnel.conf`.
+`/etc/systemd/system`، لاگ‌ها در `/var/log/gft-tunnel` و فایل sysctl در
+`/etc/sysctl.d/99-gft-tunnel.conf`.
 
 ---
 
@@ -89,9 +155,9 @@ GRE_FRP_ROLE=foreign GRE_FRP_PORTS="443,2053" sudo -E ./install.sh
 
 | یونیت systemd | کار |
 |---|---|
-| `gre-frp-tunnel.service` | ساخت مجدد تانل GRE هنگام بوت |
-| `gre-frp-tunnel-optimize.timer` | اجرای بهینه‌ساز **هر یک ساعت** و ۲ دقیقه بعد از بوت |
-| `gre-frp-tunnel-frpupdate.timer` | روزی یک‌بار: نصب آخرین نسخهٔ frp |
+| `gft-tunnel.service` | ساخت مجدد تانل GRE هنگام بوت |
+| `gft-tunnel-optimize.timer` | اجرای بهینه‌ساز **هر یک ساعت** و ۲ دقیقه بعد از بوت |
+| `gft-tunnel-frpupdate.timer` | روزی یک‌بار: نصب آخرین نسخهٔ frp |
 | `frps.service` / `frpc.service` | خود تانل با `Restart=always` |
 
 ### بهترین MTU و TTL چطور حساب می‌شود
@@ -108,35 +174,58 @@ GRE_FRP_ROLE=foreign GRE_FRP_PORTS="443,2053" sudo -E ./install.sh
   طوری تنظیم می‌شود که داخل MTU کشف‌شده جا شود؛ این مقدار در زمان نصب قطعی
   می‌شود تا دو سمت همیشه هم‌خوان باشند.
 
-هر اجرا یک خط در `/var/log/gre-frp-tunnel/optimize.log` ثبت می‌کند و دستور
-`gre-frp-tunnel status` مقدار فعلی MTU/TTL و لاس اندازه‌گیری‌شده را نشان می‌دهد.
+هر اجرا یک خط در `/var/log/gft-tunnel/optimize.log` ثبت می‌کند و دستور
+`gft status` مقدار فعلی MTU/TTL و لاس اندازه‌گیری‌شده را نشان می‌دهد.
+
+### سرعت بالا، پکت‌لاس کم و سبک بودن
+
+* **کلمپ MSS** (`--set-mss MTU-40` روی پورت‌های تانل) باعث می‌شود TCP ترافیک
+  داخل MTU تانل بماند؛ پس دانلودهای بزرگ تکه‌تکه و کند نمی‌شوند. این کلمپ با
+  MTU ساعتی هم‌گام می‌شود و قاعدهٔ تکراری روی هم نمی‌گذارد.
+* **BBR + fq** اگر کرنل پشتیبانی کند فعال می‌شوند
+  (`net.ipv4.tcp_congestion_control = bbr` و `net.core.default_qdisc = fq`) و
+  به‌علاوه `net.ipv4.tcp_mtu_probing = 1` برای عبور از چاله‌های PMTU. با
+  `GFT_TCP_CC=cubic|none` می‌توانید خاموش کنید یا با `GFT_TUNE_NETWORK=0` کل
+  تنظیم شبکه را رد کنید.
+* **سبک به‌صورت طراحی‌شده** — نه پروسهٔ تانل userspace، نه پروکسی و نه پایتون:
+  فقط bash + GRE کرنل + یک جفت frp. بهینه‌ساز ساعتی یک oneshot کوتاه‌عمر است و
+  سر‌صفحهٔ منو فقط فایل کوچک وضعیت را می‌خواند (بدون ping)، پس مصرف رم و CPU
+  معقول می‌ماند.
 
 ---
 
 ## دستورها
 
 ```bash
-sudo gre-frp-tunnel                 # منوی تعاملی (میان‌بر: gft)
-sudo gre-frp-tunnel status          # وضعیت لینک، MTU/TTL، پورت‌ها، سرویس‌ها
-sudo gre-frp-tunnel test            # تست تانل، تکه‌تکه شدن، پورت کنترل، پورت‌ها
-sudo gre-frp-tunnel optimize        # محاسبهٔ فوری بهترین MTU و TTL
-sudo gre-frp-tunnel ports add 8443  # افزودن پورت تانل (TCP + UDP)
-sudo gre-frp-tunnel ports remove 2053
-sudo gre-frp-tunnel ports list
-sudo gre-frp-tunnel frp update      # نصب آخرین نسخهٔ frp
-sudo gre-frp-tunnel frp token       # نمایش توکن مشترک
-sudo gre-frp-tunnel restart
-sudo gre-frp-tunnel logs
-sudo gre-frp-tunnel config
-sudo gre-frp-tunnel export-peer     # نوشتن کانفیگ سمت مقابل در /etc/gre-frp-tunnel
-sudo gre-frp-tunnel firewall show
-sudo gre-frp-tunnel uninstall
+sudo gft                        # منوی تعاملی
+sudo gft status                 # وضعیت لینک، MTU/TTL، پورت‌ها، سرویس‌ها
+sudo gft test                   # تست تانل، تکه‌تکه شدن، پورت کنترل، پورت‌ها
+sudo gft optimize               # محاسبهٔ فوری بهترین MTU و TTL
+sudo gft edit                   # ویرایشگر تعاملی همهٔ تنظیمات تانل
+sudo gft set <key> <value>      # تغییر یک تنظیم بدون سؤال
+sudo gft tunnel-port            # نمایش / تغییر پورت تانل (کنترل)
+sudo gft ports add 8443         # افزودن پورت تانل (TCP + UDP)
+sudo gft ports remove 2053
+sudo gft ports list
+sudo gft frp update             # نصب آخرین نسخهٔ frp
+sudo gft frp token              # نمایش توکن مشترک
+sudo gft update                 # به‌روزرسانی خود gft-TUNNEL از گیت‌هاب
+sudo gft restart
+sudo gft logs
+sudo gft config
+sudo gft export-peer            # نوشتن کانفیگ سمت مقابل در /etc/gft-tunnel
+sudo gft firewall show
+sudo gft uninstall
 ```
 
-متغیرهای محیطی مفید: `GRE_FRP_ROLE`، `GRE_FRP_LOCAL_PUBLIC`،
-`GRE_FRP_PEER_PUBLIC`، `GRE_FRP_PORTS`، `GRE_FRP_CTRL_PORT`،
-`GRE_FRP_GRE_LOCAL`، `GRE_FRP_GRE_REMOTE`، `GRE_FRP_LOCAL_TARGET_IP`،
-`GRE_FRP_NONINTERACTIVE=1` و `GRE_FRP_DRY_RUN=1` (نمایش همهٔ تغییرات بدون اعمال).
+کلیدهای `set`: `peer-ip`، `local-ip`، `gre-local`، `gre-remote`، `tunnel-port`،
+`ports`، `target`، `mtu`، `ttl`.
+
+متغیرهای محیطی مفید: `GFT_ROLE`، `GFT_LOCAL_PUBLIC`،
+`GFT_PEER_PUBLIC`، `GFT_PORTS`، `GFT_CTRL_PORT`،
+`GFT_GRE_LOCAL`، `GFT_GRE_REMOTE`، `GFT_LOCAL_TARGET_IP`،
+`GFT_TOKEN`، `GFT_TCP_CC`، `GFT_TUNE_NETWORK`، `GFT_UPDATE_REF`،
+`GFT_NONINTERACTIVE=1` و `GFT_DRY_RUN=1` (نمایش همهٔ تغییرات بدون اعمال).
 
 ---
 
@@ -144,53 +233,63 @@ sudo gre-frp-tunnel uninstall
 
 * موتور فایروال فقط **قاعدهٔ ACCEPT** اضافه می‌کند و هیچ‌وقت چیزی را drop یا
   reject نمی‌کند؛ پس امکان قفل شدن SSH وجود ندارد. قاعده‌ها با کامنت
-  `gre-frp-tunnel` ثبت می‌شوند و با `uninstall` پاک می‌شوند.
+  `gft-tunnel` ثبت می‌شوند و با `uninstall` پاک می‌شوند.
 * **محافظ پورت SSH** — تانل کردن پورت SSH (از `sshd_config` یا ۲۲) رد می‌شود
-  مگر با `GRE_FRP_ALLOW_SSH_PORT=1` عمداً اجازه دهید.
-* **کانال کنترل داخل تانل** — پورت ۷۰۰۰ روی اینترنت عمومی باز نمی‌شود.
+  مگر با `GFT_ALLOW_SSH_PORT=1` عمداً اجازه دهید.
+* **کانال کنترل داخل تانل** — `frps` روی آی‌پی تانل گوش می‌دهد، پس پورت کنترل
+  روی اینترنت عمومی باز نمی‌شود.
 * مقدار `auth.token` از جفت آی‌پی عمومی (بدون وابستگی به ترتیب) ساخته می‌شود،
   پس هر دو سرور خودشان به مقدار یکسان می‌رسند و نیازی به کپی دستی نیست. با
-  `gre-frp-tunnel frp token` آن را ببینید یا با `GRE_FRP_TOKEN=…` روی هر دو سرور
-  مقدار دلخواه بگذارید.
+  `gft frp token` آن را ببینید یا با `GFT_TOKEN=…` روی هر دو سرور مقدار دلخواه
+  بگذارید.
 * سازگار با `ufw`، `iptables` و `firewalld`.
 
 ---
 
 ## تست
 
-پروژه یک مجموعه تست دودی کامل دارد که به root، شبکه یا فایروال دست نمی‌زند:
+پروژه یک مجموعه تست دودی کامل دارد که به root، شبکه یا فایروال دست نمی‌زند و
+همهٔ دستورهای دسترسی‌دار را با استاب شبیه‌سازی می‌کند:
 
 ```bash
-bash test/smoke.sh                 # حدود ۲۵۰ بررسی برای هر دو نقش
-SECTIONS="mtu_ttl firewall" bash test/smoke.sh
+bash test/smoke.sh                 # هر دو نقش + CLI، حدود ۳۰۰ بررسی
+SECTIONS="set tui update perf" bash test/smoke.sh   # اجرای بخشی از تست‌ها
+QUIET=1 bash test/smoke.sh         # فقط خطاها
 ```
 
 پوشش: نصب کامل هر دو نقش، ساخت و پایداری GRE، بهینه‌سازی MTU/TTL (شامل مسیر
 پکت‌ریز و مسیر با ICMP فیلترشده)، مدیریت پورت، محافظ SSH، نصب/به‌روزرسانی frp و
-خطای checksum، سه بک‌اند فایروال، تکرار نصب (idempotency)، حالت dry-run و
-حذف کامل. CI در هر push آن را اجرا می‌کند.
+خطای checksum، سه بک‌اند فایروال، تکرار نصب (idempotency)، حالت dry-run، حذف
+کامل، **تغییر همهٔ تنظیمات با `set`**، **منوی تمام‌صفحه** (اسکریپتی، شامل
+زیرمنوها)، **به‌روزرسانی خودکار از گیت‌هاب** و **گاردهای عملکرد/سبک بودن**.
+CI در هر push آن را اجرا می‌کند.
 
 ---
 
 ## رفع اشکال
 
 ```bash
-sudo gre-frp-tunnel test
-ip -d link show gre-frp
+sudo gft test
+ip -d link show gft0
 ping -M do -s 1448 10.99.99.2        # تست تکه‌تکه شدن از سمت ایران
 sudo journalctl -u frps -n 50        # روی سرور خارج: -u frpc
-sudo tail -f /var/log/gre-frp-tunnel/optimize.log
+sudo tail -f /var/log/gft-tunnel/optimize.log
 ```
 
 * **بعد از تنظیم فقط یک سرور تانل بالا نیست** — طبیعی است؛ به‌محض تنظیم سرور
   مقابل، لینک بالا می‌آید و بهینه‌ساز ساعتی آن را تنظیم می‌کند.
-* **پینگ بالا یا پکت‌لاس** — `gre-frp-tunnel optimize` را اجرا کنید و ستون لاس
-  را ببینید؛ اگر MTU مسیر کمتر از سرویس‌دهنده باشد خودش پایین می‌آید.
-* **پورت از سمت کلاینت در دسترس نیست** — `gre-frp-tunnel test` روی سرور ایران
-  نشان می‌دهد `frps` گوش می‌دهد یا نه؛ مطمئن شوید پنل روی سرور خارج واقعاً روی
-  همان پورت گوش می‌دهد.
+* **پینگ بالا یا پکت‌لاس** — `gft optimize` را اجرا کنید و ستون لاس را ببینید؛
+  اگر MTU مسیر کمتر از سرویس‌دهنده باشد خودش پایین می‌آید.
+* **پورت از سمت کلاینت در دسترس نیست** — `gft test` روی سرور ایران نشان می‌دهد
+  `frps` گوش می‌دهد یا نه؛ مطمئن شوید پنل روی سرور خارج واقعاً روی همان پورت
+  گوش می‌دهد.
+* **آی‌پی ایران عوض شده و سرور خارج باید دنبالش بیاید** — روی سرور خارج
+  `sudo gft set peer-ip <آی‌پی جدید ایران>` را بزنید؛ لینک، فایروال و آی‌پی‌های
+  تانل در یک مرحله بازسازی می‌شوند.
 * **آی‌پی عمومی شناسایی نشد** — دستی وارد کنید؛ در حالت بدون سؤال از
-  `GRE_FRP_LOCAL_PUBLIC` استفاده کنید.
+  `GFT_LOCAL_PUBLIC` استفاده کنید.
+* **بعد از ریبوت تانل بالا نیامد** — `systemctl status gft-tunnel` و
+  `systemctl list-timers | grep gft-tunnel`.
 
 ## پیش‌نیازها
 

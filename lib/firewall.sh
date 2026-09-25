@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================
-# GRE+FRP-TUNNEL — lib/firewall.sh
+# gft-TUNNEL — lib/firewall.sh
 #
 # Firewall rules for the tunnel. Three hard rules of this file:
 #   1. It only ever ADDS ACCEPT rules. Nothing is ever dropped or
 #      rejected, so SSH can not be locked out.
-#   2. Every rule carries the comment "gre-frp-tunnel" and can be
-#      removed again by `gre-frp-tunnel uninstall`.
+#   2. Every rule carries the comment "gft-tunnel" and can be
+#      removed again by `gft uninstall`.
 #   3. The exact rules that were applied are recorded in
 #      <state>/firewall.rules, so teardown never depends on the
 #      current configuration.
@@ -18,12 +18,12 @@
 #     <table>|<chain>|<spec>
 # ============================================================
 
-[ -n "${GRE_FRP_FW_LOADED:-}" ] && return 0
-GRE_FRP_FW_LOADED=1
+[ -n "${GFT_FW_LOADED:-}" ] && return 0
+GFT_FW_LOADED=1
 
-GRE_FRP_FW_TAG="gre-frp-tunnel"
-GRE_FRP_FW_RULES_FILE="$GRE_FRP_STATE_DIR/firewall.rules"
-GRE_FRP_FW_MAX_MPORTS=15
+GFT_FW_TAG="gft-tunnel"
+GFT_FW_RULES_FILE="$GFT_STATE_DIR/firewall.rules"
+GFT_FW_MAX_MPORTS=15
 
 firewalld_active() {
   have firewall-cmd && firewall-cmd --state >/dev/null 2>&1
@@ -40,8 +40,8 @@ firewalld_active() {
 # Clamping the advertised MSS to GRE_MTU - 40 fixes that.
 # ------------------------------------------------------------
 fw_mss_value() {
-  local mtu; mtu="$(cfg_get TUNNEL_MTU "$GRE_FRP_DEFAULT_MTU")"
-  is_uint "$mtu" || mtu="$GRE_FRP_DEFAULT_MTU"
+  local mtu; mtu="$(cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU")"
+  is_uint "$mtu" || mtu="$GFT_DEFAULT_MTU"
   local mss=$(( mtu - 40 ))
   [ "$mss" -lt 536 ] && mss=536
   [ "$mss" -gt 1460 ] && mss=1460
@@ -60,7 +60,7 @@ fw_mss_specs() {
   for p in $(ports_parse "$ports" 2>/dev/null); do
     if [ -z "$chunk" ]; then chunk="$p"; else chunk="$chunk,$p"; fi
     n=$(( n + 1 ))
-    if [ "$n" -ge "$GRE_FRP_FW_MAX_MPORTS" ]; then
+    if [ "$n" -ge "$GFT_FW_MAX_MPORTS" ]; then
       printf 'mangle|PREROUTING|-p tcp --tcp-flags SYN,RST SYN -m multiport --dports %s -j TCPMSS --set-mss %s\n' "$chunk" "$mss"
       chunk=""; n=0
     fi
@@ -75,12 +75,12 @@ fw_mss_specs() {
 # ------------------------------------------------------------
 # Emits one rule per line:  <table>|<chain>|<spec>
 fw_rule_specs() {
-  local role dev peer_pub gre_remote ctrl ports p local_ip
+  local role dev peer_pub gft_gre_remote ctrl ports p local_ip
   role="$(cfg_get ROLE)"
-  dev="$(cfg_get TUN_DEV "$GRE_FRP_TUN_DEV")"
+  dev="$(cfg_get TUN_DEV "$GFT_TUN_DEV")"
   peer_pub="$(cfg_get PEER_PUBLIC_IP)"
-  gre_remote="$(cfg_get GRE_IP_REMOTE)"
-  ctrl="$(cfg_get CTRL_PORT "$GRE_FRP_DEFAULT_CTRL_PORT")"
+  gft_gre_remote="$(cfg_get GRE_IP_REMOTE)"
+  ctrl="$(cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT")"
   ports="$(cfg_get TUNNEL_PORTS)"
   local_ip="$(cfg_get LOCAL_TARGET_IP "127.0.0.1")"
 
@@ -134,9 +134,9 @@ fw_assert_safe() {
 # ------------------------------------------------------------
 fw_apply_one() { # <table> <chain> <spec...>
   local table="$1" chain="$2"; shift 2
-  local full="$* -m comment --comment $GRE_FRP_FW_TAG"
+  local full="$* -m comment --comment $GFT_FW_TAG"
 
-  if [ "$GRE_FRP_DRY_RUN" = "1" ]; then
+  if [ "$GFT_DRY_RUN" = "1" ]; then
     printf '%s  + iptables -t %s -I %s 1 %s%s\n' "$C_DIM" "$table" "$chain" "$full" "$C_0"
     return 0
   fi
@@ -162,9 +162,9 @@ fw_apply_one() { # <table> <chain> <spec...>
 
 fw_remove_one() { # <table> <chain> <spec...>
   local table="$1" chain="$2"; shift 2
-  local full="$* -m comment --comment $GRE_FRP_FW_TAG"
+  local full="$* -m comment --comment $GFT_FW_TAG"
 
-  if [ "$GRE_FRP_DRY_RUN" = "1" ]; then
+  if [ "$GFT_DRY_RUN" = "1" ]; then
     printf '%s  + iptables -t %s -D %s %s%s\n' "$C_DIM" "$table" "$chain" "$full" "$C_0"
     return 0
   fi
@@ -204,10 +204,10 @@ _fw_for_each() { # <action> <rules-string>
   printf '%s' "$n"
 }
 
-fw_record() { printf '%s\n' "$1" | grep -v '^$' | put_file "$GRE_FRP_FW_RULES_FILE"; }
+fw_record() { printf '%s\n' "$1" | grep -v '^$' | put_file "$GFT_FW_RULES_FILE"; }
 
 fw_recorded_rules() {
-  [ -f "$GRE_FRP_FW_RULES_FILE" ] && cat "$GRE_FRP_FW_RULES_FILE"
+  [ -f "$GFT_FW_RULES_FILE" ] && cat "$GFT_FW_RULES_FILE"
 }
 
 fw_recorded_table() { # <table>
@@ -245,7 +245,7 @@ fw_remove() {
   rules="$(fw_recorded_rules)"
   [ -n "$rules" ] || rules="$(fw_rule_specs)"
   n="$(_fw_for_each fw_remove_one "$rules")"
-  [ "$GRE_FRP_DRY_RUN" = "1" ] || rm -f "$GRE_FRP_FW_RULES_FILE" 2>/dev/null || true
+  [ "$GFT_DRY_RUN" = "1" ] || rm -f "$GFT_FW_RULES_FILE" 2>/dev/null || true
   ok "$n firewall rule(s) removed"
   return 0
 }
@@ -267,6 +267,7 @@ $mss_rules"
   else
     fw_record "$mss_rules"
   fi
+  cfg_set MSS_CLAMPED "$(fw_mss_value)"
   return 0
 }
 
@@ -283,7 +284,7 @@ fw_status() {
     table="${line%%|*}"; line="${line#*|}"
     chain="${line%%|*}"; spec="${line#*|}"
     # shellcheck disable=SC2086
-    if iptables -t "$table" -C "$chain" $spec -m comment --comment "$GRE_FRP_FW_TAG" >/dev/null 2>&1; then
+    if iptables -t "$table" -C "$chain" $spec -m comment --comment "$GFT_FW_TAG" >/dev/null 2>&1; then
       printf '  %s✔%s %s %s %s\n' "$C_G" "$C_0" "$table" "$chain" "$spec"
       ok_count=$(( ok_count + 1 ))
     else

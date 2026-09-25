@@ -1,34 +1,34 @@
 #!/usr/bin/env bash
 # ============================================================
-# GRE+FRP-TUNNEL — lib/units.sh
+# gft-TUNNEL — lib/units.sh
 # Installs the systemd units that make everything survive a
 # reboot:
-#   gre-frp-tunnel.service          recreate the GRE device
-#   gre-frp-tunnel-optimize.timer   hourly MTU/TTL autotune
-#   gre-frp-tunnel-frpupdate.timer  daily "always latest frp"
+#   gft-tunnel.service          recreate the GRE device
+#   gft-tunnel-optimize.timer   hourly MTU/TTL autotune
+#   gft-tunnel-frpupdate.timer  daily "always latest frp"
 #   frps.service | frpc.service     the tunnel itself
 # ============================================================
 
-[ -n "${GRE_FRP_UNITS_LOADED:-}" ] && return 0
-GRE_FRP_UNITS_LOADED=1
+[ -n "${GFT_UNITS_LOADED:-}" ] && return 0
+GFT_UNITS_LOADED=1
 
-GRE_FRP_UNIT_NAMES="gre-frp-tunnel.service gre-frp-tunnel-optimize.service gre-frp-tunnel-optimize.timer gre-frp-tunnel-frpupdate.service gre-frp-tunnel-frpupdate.timer frps.service frpc.service"
+GFT_UNIT_NAMES="gft-tunnel.service gft-tunnel-optimize.service gft-tunnel-optimize.timer gft-tunnel-frpupdate.service gft-tunnel-frpupdate.timer frps.service frpc.service"
 
 units_templates_dir() {
-  if [ -n "${GRE_FRP_TEMPLATES_DIR:-}" ]; then
-    printf '%s' "$GRE_FRP_TEMPLATES_DIR"; return
+  if [ -n "${GFT_TEMPLATES_DIR:-}" ]; then
+    printf '%s' "$GFT_TEMPLATES_DIR"; return
   fi
-  printf '%s/systemd' "$GRE_FRP_SELF_DIR"
+  printf '%s/systemd' "$GFT_SELF_DIR"
 }
 
 units_substitute() { # <src> -> stdout
   local src="$1"
   sed \
-    -e "s#__CLI__#${GRE_FRP_CLI_PATH}#g" \
-    -e "s#__BIN__#${GRE_FRP_BIN_DIR}#g" \
-    -e "s#__FRP_ETC__#${GRE_FRP_FRP_ETC_DIR}#g" \
-    -e "s#__LOG__#${GRE_FRP_LOG_DIR}#g" \
-    -e "s#__STATE__#${GRE_FRP_STATE_DIR}#g" \
+    -e "s#__CLI__#${GFT_CLI_PATH}#g" \
+    -e "s#__BIN__#${GFT_BIN_DIR}#g" \
+    -e "s#__FRP_ETC__#${GFT_FRP_ETC_DIR}#g" \
+    -e "s#__LOG__#${GFT_LOG_DIR}#g" \
+    -e "s#__STATE__#${GFT_STATE_DIR}#g" \
     "$src"
 }
 
@@ -39,13 +39,13 @@ units_install() {
     err "unit templates not found in $tdir"
     return 1
   fi
-  [ "$GRE_FRP_DRY_RUN" != "1" ] && mkdir -p "$GRE_FRP_SYSTEMD_DIR" 2>/dev/null || true
-  for name in $GRE_FRP_UNIT_NAMES; do
+  [ "$GFT_DRY_RUN" != "1" ] && mkdir -p "$GFT_SYSTEMD_DIR" 2>/dev/null || true
+  for name in $GFT_UNIT_NAMES; do
     src="$tdir/$name"
     [ -f "$src" ] || { warn "missing unit template: $name"; continue; }
-    units_substitute "$src" | put_file "$GRE_FRP_SYSTEMD_DIR/$name"
+    units_substitute "$src" | put_file "$GFT_SYSTEMD_DIR/$name"
   done
-  ok "systemd units installed in $GRE_FRP_SYSTEMD_DIR"
+  ok "systemd units installed in $GFT_SYSTEMD_DIR"
 }
 
 units_reload() {
@@ -60,9 +60,9 @@ units_reload() {
 
 units_enable() {
   is_systemd || return 0
-  mutq systemctl enable gre-frp-tunnel.service \
-        gre-frp-tunnel-optimize.timer \
-        gre-frp-tunnel-frpupdate.timer || true
+  mutq systemctl enable gft-tunnel.service \
+        gft-tunnel-optimize.timer \
+        gft-tunnel-frpupdate.timer || true
   local role; role="$(cfg_get ROLE)"
   if [ "$role" = "iran" ]; then
     mutq systemctl enable frps.service || true
@@ -71,14 +71,14 @@ units_enable() {
     mutq systemctl enable frpc.service || true
     mutq systemctl disable --now frps.service 2>/dev/null || true
   fi
-  ok "enabled on boot: gre-frp-tunnel + hourly optimizer + daily frp updater"
+  ok "enabled on boot: gft-tunnel + hourly optimizer + daily frp updater"
 }
 
 units_disable() {
   is_systemd || return 0
-  mutq systemctl disable --now gre-frp-tunnel-optimize.timer \
-        gre-frp-tunnel-frpupdate.timer 2>/dev/null || true
-  mutq systemctl disable gre-frp-tunnel.service frps.service frpc.service 2>/dev/null || true
+  mutq systemctl disable --now gft-tunnel-optimize.timer \
+        gft-tunnel-frpupdate.timer 2>/dev/null || true
+  mutq systemctl disable gft-tunnel.service frps.service frpc.service 2>/dev/null || true
 }
 
 services_restart_role() {
@@ -86,7 +86,7 @@ services_restart_role() {
     warn "systemd not available — start frps/frpc manually"
     return 0
   }
-  mutq systemctl restart gre-frp-tunnel.service || true
+  mutq systemctl restart gft-tunnel.service || true
   local role; role="$(cfg_get ROLE)"
   if [ "$role" = "iran" ]; then
     mutq systemctl restart frps.service
@@ -137,7 +137,7 @@ services_start_verified() {
 services_status() {
   is_systemd || { warn "systemd not available"; return 0; }
   local u state
-  for u in gre-frp-tunnel.service gre-frp-tunnel-optimize.timer gre-frp-tunnel-frpupdate.timer frps.service frpc.service; do
+  for u in gft-tunnel.service gft-tunnel-optimize.timer gft-tunnel-frpupdate.timer frps.service frpc.service; do
     state="$(systemctl is-active "$u" 2>/dev/null || true)"
     case "$state" in
       active) printf '  %-38s %sactive%s\n' "$u" "$C_G" "$C_0" ;;
@@ -150,9 +150,9 @@ services_status() {
 units_remove() {
   is_systemd && units_disable
   local name
-  for name in $GRE_FRP_UNIT_NAMES; do
-    if [ -f "$GRE_FRP_SYSTEMD_DIR/$name" ]; then
-      mutq rm -f "$GRE_FRP_SYSTEMD_DIR/$name"
+  for name in $GFT_UNIT_NAMES; do
+    if [ -f "$GFT_SYSTEMD_DIR/$name" ]; then
+      mutq rm -f "$GFT_SYSTEMD_DIR/$name"
     fi
   done
   units_reload || true

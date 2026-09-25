@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# GRE+FRP-TUNNEL — lib/prereq.sh
+# gft-TUNNEL — lib/prereq.sh
 # Detects the distribution and installs everything the tunnel
 # needs on *both* servers (Iran and foreign).
 #
@@ -11,12 +11,12 @@
 #   * Nothing here is destructive: no removals, no repo changes.
 # ============================================================
 
-[ -n "${GRE_FRP_PREREQ_LOADED:-}" ] && return 0
-GRE_FRP_PREREQ_LOADED=1
+[ -n "${GFT_PREREQ_LOADED:-}" ] && return 0
+GFT_PREREQ_LOADED=1
 
 # Required command -> package name per family
-GRE_FRP_REQ_CMDS="ip curl tar iptables ping"
-GRE_FRP_OPT_CMDS="modprobe ss jq awk"
+GFT_REQ_CMDS="ip curl tar iptables ping"
+GFT_OPT_CMDS="modprobe ss jq awk"
 
 pkg_family() {
   if [ -r /etc/os-release ]; then
@@ -69,7 +69,7 @@ pkg_name() {
 pkg_install() {
   local fam; fam="$(pkg_family)"
   [ $# -gt 0 ] || return 0
-  if [ "$GRE_FRP_DRY_RUN" = "1" ]; then
+  if [ "$GFT_DRY_RUN" = "1" ]; then
     printf '%s+ install: %s%s\n' "$C_DIM" "$*" "$C_0"
     return 0
   fi
@@ -92,7 +92,7 @@ pkg_install() {
 prereq_missing_required() {
   local cmd pkg out="" fam
   fam="$(pkg_family)"
-  for cmd in $GRE_FRP_REQ_CMDS; do
+  for cmd in $GFT_REQ_CMDS; do
     have "$cmd" || out="$out $(pkg_name "$cmd" "$fam")"
   done
   printf '%s' "$out"
@@ -119,7 +119,7 @@ prereq_install() {
 
   # optional extras (never fatal) — jq just makes FRP JSON parsing nicer
   local opt_missing=""
-  for cmd in $GRE_FRP_OPT_CMDS; do
+  for cmd in $GFT_OPT_CMDS; do
     have "$cmd" || opt_missing="$opt_missing $(pkg_name "$cmd" "$fam")"
   done
   if [ -n "$opt_missing" ]; then
@@ -137,29 +137,29 @@ prereq_ensure_gre_module() {
   # eagerly gives a clear error early on kernels that ship it as a module.
   if have modprobe; then
     quiet modprobe gre || quiet modprobe ip_gre || true
-    mkdir -p "$GRE_FRP_MODULES_LOAD_DIR" 2>/dev/null || true
-    if [ -d "$GRE_FRP_MODULES_LOAD_DIR" ] && [ ! -f "$GRE_FRP_MODULES_LOAD_DIR/gre-frp-tunnel.conf" ]; then
-      echo gre | put_file "$GRE_FRP_MODULES_LOAD_DIR/gre-frp-tunnel.conf"
+    mkdir -p "$GFT_MODULES_LOAD_DIR" 2>/dev/null || true
+    if [ -d "$GFT_MODULES_LOAD_DIR" ] && [ ! -f "$GFT_MODULES_LOAD_DIR/gft-tunnel.conf" ]; then
+      echo gre | put_file "$GFT_MODULES_LOAD_DIR/gft-tunnel.conf"
     fi
   fi
 
   # best-effort probe: can this kernel actually create a gre device?
-  local gre_state="unsupported"
+  local gft_gre_state="unsupported"
   if have ip; then
     if quiet ip link add gre-probe type gre 2>/dev/null; then
       quiet ip link del gre-probe
-      gre_state="ok"
+      gft_gre_state="ok"
     elif [ ! -w /proc/sys/net ] && [ "$(id -u)" != "0" ]; then
-      gre_state="unverified (need root)"
+      gft_gre_state="unverified (need root)"
     fi
   fi
-  dim "gre kernel support: $gre_state"
+  dim "gre kernel support: $gft_gre_state"
 }
 
 prereq_verify() {
   local fam; fam="$(pkg_family)"
   local missing="" cmd
-  for cmd in $GRE_FRP_REQ_CMDS; do
+  for cmd in $GFT_REQ_CMDS; do
     have "$cmd" || missing="$missing $(pkg_name "$cmd" "$fam")"
   done
   if [ -n "$missing" ]; then
@@ -173,10 +173,10 @@ prereq_verify() {
 prereq_report() {
   local cmd state
   printf '%-12s %s\n' "TOOL" "STATUS"
-  for cmd in $GRE_FRP_REQ_CMDS $GRE_FRP_OPT_CMDS; do
+  for cmd in $GFT_REQ_CMDS $GFT_OPT_CMDS; do
     if have "$cmd"; then
       state="${C_G}present${C_0}"
-    elif grep -qw "$cmd" <<<"$GRE_FRP_REQ_CMDS"; then
+    elif grep -qw "$cmd" <<<"$GFT_REQ_CMDS"; then
       state="${C_R}missing${C_0}"
     else
       state="${C_Y}optional${C_0}"

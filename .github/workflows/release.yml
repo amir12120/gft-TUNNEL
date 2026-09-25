@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run the smoke test suite
         run: |
-          chmod +x gre-frp-tunnel install.sh lib/*.sh test/*.sh test/stub/*
+          chmod +x gft install.sh lib/*.sh test/*.sh test/stub/*
           bash test/smoke.sh
 
   release:
@@ -57,9 +57,9 @@ jobs:
 
       - name: Build the release archive
         run: |
-          name="gre-frp-tunnel-${{ steps.ver.outputs.version }}"
+          name="gft-tunnel-${{ steps.ver.outputs.version }}"
           mkdir -p "dist/$name"
-          cp -r gre-frp-tunnel install.sh lib systemd VERSION README.md README.fa.md \
+          cp -r gft install.sh lib systemd VERSION README.md README.fa.md \
                 CHANGELOG.md LICENSE "dist/$name/"
           tar -czf "dist/$name.tar.gz" -C dist "$name"
           sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
@@ -70,7 +70,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ steps.ver.outputs.tag }}" \
-            "dist/gre-frp-tunnel-${{ steps.ver.outputs.version }}.tar.gz" \
-            "dist/gre-frp-tunnel-${{ steps.ver.outputs.version }}.tar.gz.sha256" \
-            --title "${{ steps.ver.outputs.tag }} — first release" \
+            "dist/gft-tunnel-${{ steps.ver.outputs.version }}.tar.gz" \
+            "dist/gft-tunnel-${{ steps.ver.outputs.version }}.tar.gz.sha256" \
+            --title "gft-TUNNEL ${{ steps.ver.outputs.tag }}" \
             --generate-notes

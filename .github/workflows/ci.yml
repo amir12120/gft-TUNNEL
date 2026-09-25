@@ -22,7 +22,7 @@ jobs:
       - name: Bash syntax check (every script)
         run: |
           fail=0
-          for f in gre-frp-tunnel install.sh lib/*.sh test/*.sh test/stub/*; do
+          for f in gft install.sh lib/*.sh test/*.sh test/stub/*; do
             [ -f "$f" ] || continue
             if bash -n "$f"; then
               echo "ok   $f"
@@ -37,25 +37,25 @@ jobs:
         run: |
           shellcheck --version
           shellcheck -S error -e SC1090,SC1091 \
-            gre-frp-tunnel install.sh lib/*.sh test/smoke.sh test/stub/*
+            gft install.sh lib/*.sh test/smoke.sh test/stub/*
 
       - name: ShellCheck (warnings, informational)
         continue-on-error: true
         run: |
           shellcheck -S warning -f gcc -e SC1090,SC1091 \
-            gre-frp-tunnel install.sh lib/*.sh test/smoke.sh test/stub/* \
+            gft install.sh lib/*.sh test/smoke.sh test/stub/* \
             | tee /tmp/shellcheck-warnings.txt
           echo "$(wc -l </tmp/shellcheck-warnings.txt) warning line(s)"
 
       - name: Run the smoke test suite
         run: |
-          chmod +x gre-frp-tunnel install.sh lib/*.sh test/*.sh test/stub/*
+          chmod +x gft install.sh lib/*.sh test/*.sh test/stub/*
           bash test/smoke.sh
 
       - name: Show the written configuration on failure
         if: failure()
         run: |
-          for d in /tmp/gre-frp-smoke.*/*/; do
+          for d in /tmp/gft0-smoke.*/*/; do
             echo "==== $d ===="
             [ -f "$d/out.txt" ] && tail -40 "$d/out.txt"
             [ -f "$d/state/config.env" ] && cat "$d/state/config.env"
@@ -69,7 +69,7 @@ jobs:
         with:
           name: smoke-artifacts
           path: |
-            /tmp/gre-frp-smoke.*/**
+            /tmp/gft0-smoke.*/**
             /tmp/*.out
           if-no-files-found: ignore
 
@@ -80,4 +80,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck (style, informational)
-        run: shellcheck -S style -e SC1090,SC1091 gre-frp-tunnel lib/*.sh install.sh || true
+        run: shellcheck -S style -e SC1090,SC1091 gft lib/*.sh install.sh || true

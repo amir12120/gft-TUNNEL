@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # ============================================================
-# GRE+FRP-TUNNEL — lib/net.sh
+# gft-TUNNEL — lib/net.sh
 #   * public IP detection + local-IP sanity checks
 #   * GRE device create/destroy (survives reboot through systemd)
 #   * best-MTU / best-TTL autotuning (loss aware)
 #   * link watchdog used by the hourly timer
 # ============================================================
 
-[ -n "${GRE_FRP_NET_LOADED:-}" ] && return 0
-GRE_FRP_NET_LOADED=1
+[ -n "${GFT_NET_LOADED:-}" ] && return 0
+GFT_NET_LOADED=1
 
 # ------------------------------------------------------------
 # Public IP
 # ------------------------------------------------------------
-GRE_FRP_IP_ENDPOINTS="${GRE_FRP_IP_ENDPOINTS:-https://api.ipify.org https://ifconfig.me/ip https://ipinfo.io/ip https://icanhazip.com https://api.ip.sb/ip}"
+GFT_IP_ENDPOINTS="${GFT_IP_ENDPOINTS:-https://api.ipify.org https://ifconfig.me/ip https://ipinfo.io/ip https://icanhazip.com https://api.ip.sb/ip}"
 
 net_public_ip_detect() {
   local url ip
-  for url in $GRE_FRP_IP_ENDPOINTS; do
+  for url in $GFT_IP_ENDPOINTS; do
     ip="$(curl -4 -fsS --max-time 6 "$url" 2>/dev/null | tr -d '\r\n\t ' || true)"
     case "$ip" in *[!0-9.]*) ip="" ;; esac
     if is_ipv4 "$ip"; then printf '%s' "$ip"; return 0; fi
@@ -70,15 +70,15 @@ net_iface_mtu() {
 # ------------------------------------------------------------
 # ping helpers (work with iputils *and* busybox)
 # ------------------------------------------------------------
-gre_frp_ping_df_ok() {
-  [ -n "${GRE_FRP_PING_DF:-}" ] && { [ "$GRE_FRP_PING_DF" = "1" ]; return; }
+gft_ping_df_ok() {
+  [ -n "${GFT_PING_DF:-}" ] && { [ "$GFT_PING_DF" = "1" ]; return; }
   local out
   out="$(ping -n -c 1 -W 1 -M do -s 56 127.0.0.1 2>&1 || true)"
   case "$out" in
-    *"invalid option"*|*"unrecognized"*|*"Bad option"*|*bad*option*|*Usage*|*usage:*) GRE_FRP_PING_DF=0 ;;
-    *) GRE_FRP_PING_DF=1 ;;
+    *"invalid option"*|*"unrecognized"*|*"Bad option"*|*bad*option*|*Usage*|*usage:*) GFT_PING_DF=0 ;;
+    *) GFT_PING_DF=1 ;;
   esac
-  [ "$GRE_FRP_PING_DF" = "1" ]
+  [ "$GFT_PING_DF" = "1" ]
 }
 
 # net_ping_host <ip> <count> <timeout> [ttl] [extra...]
@@ -101,7 +101,7 @@ net_probe_payload() {
   local dst="$1" payload="$2" to="${3:-2}" rc=0
   shift 3 || true
   local -a args=(-n -c 1 -W "$to" -s "$payload")
-  gre_frp_ping_df_ok && args+=(-M do)
+  gft_ping_df_ok && args+=(-M do)
   [ $# -gt 0 ] && args+=("$@")
   ping "${args[@]}" "$dst" >/dev/null 2>&1 || rc=$?
   return "$rc"
@@ -150,104 +150,104 @@ net_path_mtu() {
 # ------------------------------------------------------------
 # GRE device
 # ------------------------------------------------------------
-gre_dev_exists() {
-  ip link show dev "$GRE_FRP_TUN_DEV" >/dev/null 2>&1
+gft_gre_dev_exists() {
+  ip link show dev "$GFT_TUN_DEV" >/dev/null 2>&1
 }
 
 is_valid_mtu() { is_uint "${1:-}" && [ "${1:-0}" -ge 68 ] && [ "${1:-0}" -le 65535 ]; }
 
-gre_set_mtu() {
+gft_gre_set_mtu() {
   local mtu="$1"
   is_valid_mtu "$mtu" || return 1
-  mutq ip link set dev "$GRE_FRP_TUN_DEV" mtu "$mtu"
+  mutq ip link set dev "$GFT_TUN_DEV" mtu "$mtu"
 }
 
-gre_set_ttl() {
+gft_gre_set_ttl() {
   local ttl="$1"
   is_uint "$ttl" || return 1
   local rc=1
-  if gre_dev_exists; then
-    mutq ip link set dev "$GRE_FRP_TUN_DEV" type gre ttl "$ttl" && rc=0
+  if gft_gre_dev_exists; then
+    mutq ip link set dev "$GFT_TUN_DEV" type gre ttl "$ttl" && rc=0
     if [ "$rc" != "0" ]; then
-      mutq ip tunnel change "$GRE_FRP_TUN_DEV" ttl "$ttl" && rc=0
+      mutq ip tunnel change "$GFT_TUN_DEV" ttl "$ttl" && rc=0
     fi
   fi
   return "$rc"
 }
 
-gre_add_addr() {
+gft_gre_add_addr() {
   local ip="$1" prefix="${2:-30}"
   local existing
-  existing="$(ip -4 -o addr show dev "$GRE_FRP_TUN_DEV" 2>/dev/null | awk '{print $4}')"
+  existing="$(ip -4 -o addr show dev "$GFT_TUN_DEV" 2>/dev/null | awk '{print $4}')"
   case " $existing " in
     *" $ip/$prefix "*) return 0 ;;
   esac
-  mutq ip addr add "$ip/$prefix" dev "$GRE_FRP_TUN_DEV"
+  mutq ip addr add "$ip/$prefix" dev "$GFT_TUN_DEV"
 }
 
-gre_create() {
+gft_gre_create() {
   local local_pub peer_pub ttl mtu ip_local prefix
   local_pub="$(cfg_get LOCAL_PUBLIC_IP)"
   peer_pub="$(cfg_get PEER_PUBLIC_IP)"
-  ip_local="$(cfg_get GRE_IP_LOCAL "$GRE_FRP_DEFAULT_GRE_IP_IRAN")"
+  ip_local="$(cfg_get GRE_IP_LOCAL "$GFT_DEFAULT_GRE_IP_IRAN")"
   prefix="$(cfg_get GRE_PREFIX 30)"
-  ttl="$(cfg_get TUNNEL_TTL "$GRE_FRP_DEFAULT_TTL")"
-  mtu="$(cfg_get TUNNEL_MTU "$GRE_FRP_DEFAULT_MTU")"
-  is_uint "$ttl" || ttl="$GRE_FRP_DEFAULT_TTL"
-  is_uint "$mtu" || mtu="$GRE_FRP_DEFAULT_MTU"
+  ttl="$(cfg_get TUNNEL_TTL "$GFT_DEFAULT_TTL")"
+  mtu="$(cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU")"
+  is_uint "$ttl" || ttl="$GFT_DEFAULT_TTL"
+  is_uint "$mtu" || mtu="$GFT_DEFAULT_MTU"
 
-  gre_dev_exists && return 0
+  gft_gre_dev_exists && return 0
 
   if net_ip_is_local "$local_pub"; then
-    mutq ip link add name "$GRE_FRP_TUN_DEV" type gre \
+    mutq ip link add name "$GFT_TUN_DEV" type gre \
       local "$local_pub" remote "$peer_pub" ttl "$ttl" \
       || { err "could not create GRE device (is ip_gre available?)"; return 1; }
   else
     warn "public IP $local_pub is not on this machine — creating GRE without 'local' (NAT mode)"
-    mutq ip link add name "$GRE_FRP_TUN_DEV" type gre \
+    mutq ip link add name "$GFT_TUN_DEV" type gre \
       remote "$peer_pub" ttl "$ttl" \
       || { err "could not create GRE device"; return 1; }
   fi
 
-  gre_add_addr "$ip_local" "$prefix" || true
-  mutq ip link set dev "$GRE_FRP_TUN_DEV" mtu "$mtu" || true
-  mutq ip link set dev "$GRE_FRP_TUN_DEV" up || true
+  gft_gre_add_addr "$ip_local" "$prefix" || true
+  mutq ip link set dev "$GFT_TUN_DEV" mtu "$mtu" || true
+  mutq ip link set dev "$GFT_TUN_DEV" up || true
   return 0
 }
 
-gre_destroy() {
-  gre_dev_exists || return 0
-  mutq ip link del "$GRE_FRP_TUN_DEV"
+gft_gre_destroy() {
+  gft_gre_dev_exists || return 0
+  mutq ip link del "$GFT_TUN_DEV"
 }
 
-gre_peer_reachable() {
+gft_gre_peer_reachable() {
   local peer_gre out replies
-  peer_gre="$(cfg_get GRE_IP_REMOTE "$GRE_FRP_DEFAULT_GRE_IP_FOREIGN")"
+  peer_gre="$(cfg_get GRE_IP_REMOTE "$GFT_DEFAULT_GRE_IP_FOREIGN")"
   out="$(net_ping_host "$peer_gre" 1 2)"
   replies="${out%% *}"
   [ "${replies:-0}" -ge 1 ]
 }
 
-gre_ensure_up() {
-  gre_create || return 1
-  gre_add_addr "$(cfg_get GRE_IP_LOCAL "$GRE_FRP_DEFAULT_GRE_IP_IRAN")" "$(cfg_get GRE_PREFIX 30)" || true
-  gre_set_mtu "$(cfg_get TUNNEL_MTU "$GRE_FRP_DEFAULT_MTU")" || true
-  gre_set_ttl "$(cfg_get TUNNEL_TTL "$GRE_FRP_DEFAULT_TTL")" || true
-  mutq ip link set dev "$GRE_FRP_TUN_DEV" up || true
+gft_gre_ensure_up() {
+  gft_gre_create || return 1
+  gft_gre_add_addr "$(cfg_get GRE_IP_LOCAL "$GFT_DEFAULT_GRE_IP_IRAN")" "$(cfg_get GRE_PREFIX 30)" || true
+  gft_gre_set_mtu "$(cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU")" || true
+  gft_gre_set_ttl "$(cfg_get TUNNEL_TTL "$GFT_DEFAULT_TTL")" || true
+  mutq ip link set dev "$GFT_TUN_DEV" up || true
   return 0
 }
 
-gre_show() {
-  ip -d link show dev "$GRE_FRP_TUN_DEV" 2>/dev/null | head -3
+gft_gre_show() {
+  ip -d link show dev "$GFT_TUN_DEV" 2>/dev/null | head -3
 }
 
 # ------------------------------------------------------------
 # MTU / TTL autotuning
 # ------------------------------------------------------------
 # Tunnel overhead of GRE over IPv4:  20 (outer IP) + 4 (GRE header)
-GRE_FRP_GRE_OVERHEAD=24
-GRE_FRP_MIN_MTU=1280
-GRE_FRP_MAX_MTU=9000
+GFT_GRE_OVERHEAD=24
+GFT_MIN_MTU=1280
+GFT_MAX_MTU=9000
 
 net_optimize_mtu() {
   local peer_pub peer_gre iface iface_mtu path_mtu cand floor best loss out
@@ -268,18 +268,18 @@ net_optimize_mtu() {
     ok "discovered outer path MTU: ${path_mtu}"
   fi
 
-  cand=$(( path_mtu - GRE_FRP_GRE_OVERHEAD ))
-  floor=$(( iface_mtu - GRE_FRP_GRE_OVERHEAD ))
+  cand=$(( path_mtu - GFT_GRE_OVERHEAD ))
+  floor=$(( iface_mtu - GFT_GRE_OVERHEAD ))
   [ "$cand" -gt "$floor" ] && cand="$floor"
-  [ "$cand" -gt "$GRE_FRP_MAX_MTU" ] && cand="$GRE_FRP_MAX_MTU"
-  [ "$cand" -lt "$GRE_FRP_MIN_MTU" ] && cand="$GRE_FRP_MIN_MTU"
+  [ "$cand" -gt "$GFT_MAX_MTU" ] && cand="$GFT_MAX_MTU"
+  [ "$cand" -lt "$GFT_MIN_MTU" ] && cand="$GFT_MIN_MTU"
 
   best="$cand"
-  gre_set_mtu "$best" || true
+  gft_gre_set_mtu "$best" || true
 
   # verify inside the tunnel; step down 8 bytes at a time while packets drop
   local tries=0
-  while [ "$tries" -lt 6 ] && [ "$best" -ge "$GRE_FRP_MIN_MTU" ]; do
+  while [ "$tries" -lt 6 ] && [ "$best" -ge "$GFT_MIN_MTU" ]; do
     out="$(net_ping_host "$peer_gre" 4 2)"
     loss="${out##* }"
     # a full-size datagram must fit without fragmenting, otherwise the
@@ -293,8 +293,8 @@ net_optimize_mtu() {
     fi
     warn "mtu $best shows ${loss}% loss over the tunnel — stepping down"
     best=$(( best - 8 ))
-    [ "$best" -lt "$GRE_FRP_MIN_MTU" ] && { best="$GRE_FRP_MIN_MTU"; }
-    gre_set_mtu "$best" || true
+    [ "$best" -lt "$GFT_MIN_MTU" ] && { best="$GFT_MIN_MTU"; }
+    gft_gre_set_mtu "$best" || true
     tries=$(( tries + 1 ))
   done
 
@@ -306,9 +306,9 @@ net_optimize_mtu() {
   ok "best MTU: ${C_BOLD}${best}${C_0} (tunnel loss ${loss:-?}%)"
   _log OPT "mtu=$best loss=${loss:-?} path_mtu=$path_mtu iface=$iface iface_mtu=$iface_mtu"
   printf '%s mtu=%s loss=%s path_mtu=%s iface=%s iface_mtu=%s\n' \
-    "$(date '+%F %T')" "$best" "${loss:-?}" "$path_mtu" "${iface:-?}" "$iface_mtu" >>"$GRE_FRP_OPT_LOG" 2>/dev/null || true
-  GRE_FRP_BEST_MTU="$best"
-  GRE_FRP_BEST_MTU_LOSS="${loss:-0}"
+    "$(date '+%F %T')" "$best" "${loss:-?}" "$path_mtu" "${iface:-?}" "$iface_mtu" >>"$GFT_OPT_LOG" 2>/dev/null || true
+  GFT_BEST_MTU="$best"
+  GFT_BEST_MTU_LOSS="${loss:-0}"
 
   # The MSS clamp on the relay depends on the MTU, so keep it in step.
   if declare -F fw_refresh_mss >/dev/null 2>&1; then
@@ -351,7 +351,7 @@ net_optimize_ttl() {
   # Only standard, conservative TTL values are candidates: a TTL of
   # "hop count + 2" would work today and break the moment the route
   # changes, so the hop count is used as a floor instead of a target.
-  for ttl in "$GRE_FRP_DEFAULT_TTL" 128 192 255; do
+  for ttl in "$GFT_DEFAULT_TTL" 128 192 255; do
     [ "$ttl" -ge "$min_ttl" ] && cands+=("$ttl")
   done
   cur="$(cfg_get TUNNEL_TTL)"
@@ -372,7 +372,7 @@ net_optimize_ttl() {
   best_ttl=""
   best_loss=101
   for ttl in "${uniq[@]}"; do
-    gre_set_ttl "$ttl" || true
+    gft_gre_set_ttl "$ttl" || true
     out="$(net_ping_host "$peer_gre" 4 2)"
     loss="${out##* }"
     is_uint "$loss" || loss=100
@@ -384,10 +384,10 @@ net_optimize_ttl() {
   done
 
   if [ -z "$best_ttl" ]; then
-    best_ttl="$GRE_FRP_DEFAULT_TTL"
+    best_ttl="$GFT_DEFAULT_TTL"
     warn "no TTL candidate answered — keeping $best_ttl"
   fi
-  gre_set_ttl "$best_ttl" || true
+  gft_gre_set_ttl "$best_ttl" || true
   cfg_set TUNNEL_TTL "$best_ttl"
   cfg_set TUNNEL_TTL_LOSS "$best_loss"
   cfg_set TUNNEL_TTL_UPDATED "$(date '+%Y-%m-%d %H:%M:%S')"
@@ -395,13 +395,13 @@ net_optimize_ttl() {
   ok "best TTL: ${C_BOLD}${best_ttl}${C_0} (tunnel loss ${best_loss}%)"
   _log OPT "ttl=$best_ttl loss=$best_loss hops=${hops:-unknown}"
   printf '%s ttl=%s loss=%s hops=%s\n' \
-    "$(date '+%F %T')" "$best_ttl" "$best_loss" "${hops:-unknown}" >>"$GRE_FRP_OPT_LOG" 2>/dev/null || true
-  GRE_FRP_BEST_TTL="$best_ttl"
-  GRE_FRP_BEST_TTL_LOSS="$best_loss"
+    "$(date '+%F %T')" "$best_ttl" "$best_loss" "${hops:-unknown}" >>"$GFT_OPT_LOG" 2>/dev/null || true
+  GFT_BEST_TTL="$best_ttl"
+  GFT_BEST_TTL_LOSS="$best_loss"
 }
 
 net_optimize_all() {
-  gre_ensure_up || return 1
+  gft_gre_ensure_up || return 1
   net_optimize_mtu
   net_optimize_ttl
 }
@@ -409,17 +409,17 @@ net_optimize_all() {
 # Hourly watchdog: makes sure the device is still there and the peer answers
 net_watchdog() {
   local peer_gre out replies
-  if ! gre_dev_exists; then
-    warn "GRE device $GRE_FRP_TUN_DEV disappeared — recreating"
-    gre_ensure_up || return 1
+  if ! gft_gre_dev_exists; then
+    warn "GRE device $GFT_TUN_DEV disappeared — recreating"
+    gft_gre_ensure_up || return 1
   fi
   peer_gre="$(cfg_get GRE_IP_REMOTE)"
   out="$(net_ping_host "$peer_gre" 3 2)"
   replies="${out%% *}"
   if [ "${replies:-0}" -eq 0 ]; then
     warn "peer $peer_gre is not answering over the tunnel — resetting the link"
-    gre_destroy
-    gre_ensure_up || return 1
+    gft_gre_destroy
+    gft_gre_ensure_up || return 1
     out="$(net_ping_host "$peer_gre" 3 2)"
     replies="${out%% *}"
     [ "${replies:-0}" -ge 1 ] && ok "tunnel recovered" || warn "tunnel is still down"
@@ -428,33 +428,83 @@ net_watchdog() {
 }
 
 # ------------------------------------------------------------
-# sysctl (ip_forward + tunnel friendly rp_filter)
+# sysctl — forwarding, tunnel friendly rp_filter and a small
+# set of kernel tweaks that make the tunnel faster and lighter:
+#   * tcp_mtu_probing detects PMTU black holes (very common when
+#     ICMP is filtered on the Iranian side) instead of stalling,
+#   * BBR + fq keep throughput high and bufferbloat low on the
+#     relay, with no extra userspace process to feed.
 # ------------------------------------------------------------
+sysctl_supports_bbr() {
+  case "${GFT_TCP_CC:-auto}" in
+    none|off|0) return 1 ;;
+    cubic)     return 1 ;;
+    bbr)       return 0 ;;
+  esac
+  if have modprobe; then
+    mutq modprobe tcp_bbr || true
+  fi
+  sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr
+}
+
+sysctl_settings() {
+  echo "net.ipv4.ip_forward = 1"
+  echo "net.ipv4.conf.all.rp_filter = 2"
+  echo "net.ipv4.conf.default.rp_filter = 2"
+  if [ "${GFT_TUNE_NETWORK:-1}" = "1" ]; then
+    echo "net.ipv4.tcp_mtu_probing = 1"
+    if sysctl_supports_bbr; then
+      echo "net.core.default_qdisc = fq"
+      echo "net.ipv4.tcp_congestion_control = bbr"
+    fi
+  fi
+}
+
 sysctl_setup() {
-  if [ "$GRE_FRP_DRY_RUN" != "1" ]; then
-    mkdir -p "$GRE_FRP_SYSCTL_DIR" 2>/dev/null || true
+  if [ "$GFT_DRY_RUN" != "1" ]; then
+    mkdir -p "$GFT_SYSCTL_DIR" 2>/dev/null || true
   fi
   {
-    echo "# Managed by GRE+FRP-TUNNEL — do not edit by hand"
-    echo "net.ipv4.ip_forward = 1"
-    echo "net.ipv4.conf.all.rp_filter = 2"
-    echo "net.ipv4.conf.default.rp_filter = 2"
-  } | put_file "$GRE_FRP_SYSCTL_FILE"
-  mutq sysctl -q -w net.ipv4.ip_forward=1 || true
-  mutq sysctl -q -w net.ipv4.conf.all.rp_filter=2 || true
-  mutq sysctl -q -p "$GRE_FRP_SYSCTL_FILE" || true
+    echo "# Managed by ${GFT_APP_NAME} — do not edit by hand"
+    sysctl_settings
+  } | put_file "$GFT_SYSCTL_FILE"
+  sysctl_apply_now || true
   ok "IPv4 forwarding enabled (persistent)"
 }
 
+# Applies every setting from the drop-in to the running kernel
+sysctl_apply_now() {
+  local line key val applied=0 bbr=0
+  local settings
+  if [ -f "$GFT_SYSCTL_FILE" ]; then
+    settings="$(grep -v '^#' "$GFT_SYSCTL_FILE" | grep '=')"
+  else
+    settings="$(sysctl_settings)"
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key="$(printf '%s' "$line" | cut -d= -f1 | tr -d ' ')"
+    val="$(printf '%s' "$line" | cut -d= -f2- | tr -d ' ')"
+    if mutq sysctl -q -w "$key=$val"; then
+      applied=$(( applied + 1 ))
+      [ "$key" = "net.ipv4.tcp_congestion_control" ] && bbr=1
+    elif [ "$GFT_DRY_RUN" != "1" ]; then
+      warn "could not apply $key=$val on this kernel"
+    fi
+  done <<<"$settings"
+  [ "$bbr" = "1" ] && dim "  kernel: BBR congestion control + fq qdisc enabled"
+  return 0
+}
+
 sysctl_remove() {
-  if [ -f "$GRE_FRP_SYSCTL_FILE" ]; then
-    mutq rm -f "$GRE_FRP_SYSCTL_FILE"
-    ok "removed $GRE_FRP_SYSCTL_FILE"
+  if [ -f "$GFT_SYSCTL_FILE" ]; then
+    mutq rm -f "$GFT_SYSCTL_FILE"
+    ok "removed $GFT_SYSCTL_FILE"
   fi
 }
 
 # ------------------------------------------------------------
-# Probe helpers used by `gre-frp-tunnel test`
+# Probe helpers used by `gft test`
 # ------------------------------------------------------------
 net_tcp_check() {
   local host="$1" port="$2" to="${3:-3}"

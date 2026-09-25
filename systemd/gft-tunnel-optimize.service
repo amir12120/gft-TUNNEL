@@ -1,0 +1,12 @@
+[Unit]
+Description=gft-TUNNEL — recalculate the best GRE MTU and TTL (minimise packet loss)
+Documentation=https://github.com/amir12120/gft-TUNNEL
+After=gft-tunnel.service network-online.target
+Requires=gft-tunnel.service
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=__CLI__ optimize --quiet
+TimeoutStartSec=300

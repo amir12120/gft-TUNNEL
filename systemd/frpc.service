@@ -1,9 +1,9 @@
 [Unit]
-Description=frp client (frpc) — GRE+FRP-TUNNEL client on the foreign server
+Description=frp client (frpc) — gft-TUNNEL client on the foreign server
 Documentation=https://github.com/fatedier/frp
-After=network-online.target gre-frp-tunnel.service
+After=network-online.target gft-tunnel.service
 Wants=network-online.target
-Requires=gre-frp-tunnel.service
+Requires=gft-tunnel.service
 
 [Service]
 Type=simple

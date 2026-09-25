@@ -1,9 +1,9 @@
 [Unit]
-Description=frp server (frps) — GRE+FRP-TUNNEL relay on the Iranian server
+Description=frp server (frps) — gft-TUNNEL relay on the Iranian server
 Documentation=https://github.com/fatedier/frp
-After=network-online.target gre-frp-tunnel.service
+After=network-online.target gft-tunnel.service
 Wants=network-online.target
-Requires=gre-frp-tunnel.service
+Requires=gft-tunnel.service
 
 [Service]
 Type=simple

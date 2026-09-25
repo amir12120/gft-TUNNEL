@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# GRE+FRP-TUNNEL — test/smoke.sh
+# gft-TUNNEL — test/smoke.sh
 #
 # A complete, hermetic test of the whole project. It never touches
 # the host network, the host firewall or systemd: every privileged
@@ -15,9 +15,9 @@
 set -u
 
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLI="$ROOT/gre-frp-tunnel"
+CLI="$ROOT/gft"
 STUB_DIR="$ROOT/test/stub"
-WORK="${GRE_FRP_TEST_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/gre-frp-smoke.XXXXXX")}"
+WORK="${GFT_TEST_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/gft0-smoke.XXXXXX")}"
 QUIET="${QUIET:-0}"
 
 C_R=''; C_G=''; C_Y=''; C_B=''; C_D=''; C_0=''
@@ -77,27 +77,28 @@ setup_env() { # <name>
   mkdir -p "$ENV"/{bin,logs,etc,units,sysctl,run,state,stubtmp,modules,dl}
   export STUB_TMP="$ENV/stubtmp"
 
-  export GRE_FRP_STATE_DIR="$ENV/state"
-  export GRE_FRP_LOG_DIR="$ENV/logs"
-  export GRE_FRP_RUN_DIR="$ENV/run"
-  export GRE_FRP_FRP_ETC_DIR="$ENV/etc"
-  export GRE_FRP_BIN_DIR="$ENV/bin"
-  export GRE_FRP_SYSTEMD_DIR="$ENV/units"
-  export GRE_FRP_SYSCTL_DIR="$ENV/sysctl"
-  export GRE_FRP_MODULES_LOAD_DIR="$ENV/modules"
-  export GRE_FRP_DL_DIR="$ENV/dl"
-  export GRE_FRP_TEMPLATES_DIR="$ROOT/systemd"
-  export GRE_FRP_CLI_PATH="$CLI"
-  export GRE_FRP_SELF_DIR="$ROOT"
+  export GFT_STATE_DIR="$ENV/state"
+  export GFT_LOG_DIR="$ENV/logs"
+  export GFT_RUN_DIR="$ENV/run"
+  export GFT_FRP_ETC_DIR="$ENV/etc"
+  export GFT_BIN_DIR="$ENV/bin"
+  export GFT_SYSTEMD_DIR="$ENV/units"
+  export GFT_SYSCTL_DIR="$ENV/sysctl"
+  export GFT_MODULES_LOAD_DIR="$ENV/modules"
+  export GFT_DL_DIR="$ENV/dl"
+  export GFT_TEMPLATES_DIR="$ROOT/systemd"
+  export GFT_CLI_PATH="$CLI"
+  export GFT_SELF_DIR="$ROOT"
 
-  export GRE_FRP_ALLOW_NON_ROOT=1
-  export GRE_FRP_FORCE_SYSTEMD=1
-  export GRE_FRP_NONINTERACTIVE=1
-  export GRE_FRP_DRY_RUN=0
-  export GRE_FRP_ASSUME_YES=1
-  unset GRE_FRP_ROLE GRE_FRP_LOCAL_PUBLIC GRE_FRP_PEER_PUBLIC GRE_FRP_PORTS
-  unset GRE_FRP_CTRL_PORT GRE_FRP_GRE_LOCAL GRE_FRP_GRE_REMOTE GRE_FRP_LOCAL_TARGET_IP
-  unset GRE_FRP_ALLOW_SSH_PORT GRE_FRP_NO_SYSTEMD
+  export GFT_ALLOW_NON_ROOT=1
+  export GFT_FORCE_SYSTEMD=1
+  export GFT_NONINTERACTIVE=1
+  export GFT_DRY_RUN=0
+  export GFT_ASSUME_YES=1
+  unset GFT_ROLE GFT_LOCAL_PUBLIC GFT_PEER_PUBLIC GFT_PORTS
+  unset GFT_CTRL_PORT GFT_GRE_LOCAL GFT_GRE_REMOTE GFT_LOCAL_TARGET_IP
+  unset GFT_ALLOW_SSH_PORT GFT_NO_SYSTEMD GFT_NO_TTY GFT_FORCE
+  unset GFT_TCP_CC GFT_TUNE_NETWORK GFT_UPDATE_REF GFT_NO_MENU
 
   export STUB_PUBLIC_IP="203.0.113.10"
   export STUB_PEER_PUBLIC="198.51.100.9"
@@ -107,7 +108,7 @@ setup_env() { # <name>
   export STUB_HOPS="6"
   export STUB_GRE_REMOTE="10.99.99.2"
   export STUB_FRP_VERSION="0.99.0"
-  export STUB_LISTEN="7000 443 2053"
+  export STUB_LISTEN="40001 443 2053"
   unset STUB_LOSS_AT_TTL STUB_LOSS_AT_MTU STUB_BAD_CHECKSUM STUB_FIREWALLD STUB_UFW STUB_TCP_OPEN
 
   PATH="$STUB_DIR:$PATH"
@@ -134,7 +135,7 @@ state_get() { # <key>
 derived_token() { # [ip-a] [ip-b]
   local a="${1:-203.0.113.10}" b="${2:-198.51.100.9}" t
   if [ "$a" \> "$b" ]; then t="$a"; a="$b"; b="$t"; fi
-  printf '%s' "gre-frp-tunnel|${a}|${b}" | sha256sum | cut -c1-32
+  printf '%s' "gft-tunnel|${a}|${b}" | sha256sum | cut -c1-32
 }
 
 mask_state() {
@@ -158,7 +159,7 @@ seed_state() { # [role] [mtu] [ttl] [ports]
   local lp="203.0.113.10" pp="198.51.100.9" gl="10.99.99.1" gr="10.99.99.2"
   if [ "$role" = "foreign" ]; then
     lp="198.51.100.9"; pp="203.0.113.10"; gl="10.99.99.2"; gr="10.99.99.1"; fi
-  mkdir -p "$GRE_FRP_STATE_DIR" 2>/dev/null || true
+  mkdir -p "$GFT_STATE_DIR" 2>/dev/null || true
   {
     echo "ROLE=$role"
     echo "LOCAL_PUBLIC_IP=$lp"
@@ -166,15 +167,15 @@ seed_state() { # [role] [mtu] [ttl] [ports]
     echo "GRE_IP_LOCAL=$gl"
     echo "GRE_IP_REMOTE=$gr"
     echo "GRE_PREFIX=30"
-    echo "CTRL_PORT=7000"
+    echo "CTRL_PORT=40001"
     echo "TUNNEL_PORTS=$ports"
     echo "LOCAL_TARGET_IP=127.0.0.1"
-    echo "TUN_DEV=gre-frp"
+    echo "TUN_DEV=gft0"
     echo "AUTH_TOKEN=0123456789abcdef0123456789abcdef"
     echo "TUNNEL_MTU=$mtu"
     echo "TUNNEL_TTL=$ttl"
     echo "UDP_PACKET_SIZE=1444"
-  } >"$GRE_FRP_STATE_DIR/config.env"
+  } >"$GFT_STATE_DIR/config.env"
   export STUB_GRE_REMOTE="$gr"
   [ "$role" = "foreign" ] && export STUB_PUBLIC_IP="$lp"
   return 0
@@ -239,15 +240,15 @@ t_static() {
 t_unit_templates() {
   section "2. systemd unit templates"
   local u
-  for u in gre-frp-tunnel.service gre-frp-tunnel-optimize.service \
-           gre-frp-tunnel-optimize.timer gre-frp-tunnel-frpupdate.service \
-           gre-frp-tunnel-frpupdate.timer frps.service frpc.service; do
+  for u in gft-tunnel.service gft-tunnel-optimize.service \
+           gft-tunnel-optimize.timer gft-tunnel-frpupdate.service \
+           gft-tunnel-frpupdate.timer frps.service frpc.service; do
     assert_file "template $u exists" "$ROOT/systemd/$u"
   done
-  assert_contains "hourly timer is hourly" "$(cat "$ROOT/systemd/gre-frp-tunnel-optimize.timer")" "OnUnitActiveSec=1h"
-  assert_contains "optimizer runs at boot" "$(cat "$ROOT/systemd/gre-frp-tunnel-optimize.timer")" "OnBootSec="
+  assert_contains "hourly timer is hourly" "$(cat "$ROOT/systemd/gft-tunnel-optimize.timer")" "OnUnitActiveSec=1h"
+  assert_contains "optimizer runs at boot" "$(cat "$ROOT/systemd/gft-tunnel-optimize.timer")" "OnBootSec="
   assert_contains "tunnel unit recreates the link on boot" \
-    "$(cat "$ROOT/systemd/gre-frp-tunnel.service")" "ExecStart=__CLI__ service-up"
+    "$(cat "$ROOT/systemd/gft-tunnel.service")" "ExecStart=__CLI__ service-up"
 }
 
 # ============================================================
@@ -312,7 +313,7 @@ t_install_iran() {
   assert_eq "tunnel IP local"             "$(state_get GRE_IP_LOCAL)" "10.99.99.1"
   assert_eq "tunnel IP remote"            "$(state_get GRE_IP_REMOTE)" "10.99.99.2"
   assert_eq "ports stored (csv, sorted)"  "$(state_get TUNNEL_PORTS)" "443,2053"
-  assert_eq "control port stored"         "$(state_get CTRL_PORT)" "7000"
+  assert_eq "tunnel port stored (the 40001 default)" "$(state_get CTRL_PORT)" "40001"
   assert_ne "auth token generated"        "$(state_get AUTH_TOKEN)" ""
   # the token is derived from the IP pair, so the peer computes the same one
   assert_eq "auth token derived from the IP pair" "$(state_get AUTH_TOKEN)" "$(derived_token)"
@@ -320,14 +321,14 @@ t_install_iran() {
   # --- GRE device -----------------------------------------------------
   local log; log="$(ip_log)"
   assert_contains "GRE device created with both public IPs" "$log" \
-    "link add name gre-frp type gre local 203.0.113.10 remote 198.51.100.9"
-  assert_contains "GRE address added" "$log" "addr add 10.99.99.1/30 dev gre-frp"
-  assert_contains "GRE device brought up" "$log" "link set dev gre-frp up"
+    "link add name gft0 type gre local 203.0.113.10 remote 198.51.100.9"
+  assert_contains "GRE address added" "$log" "addr add 10.99.99.1/30 dev gft0"
+  assert_contains "GRE device brought up" "$log" "link set dev gft0 up"
 
   # --- MTU / TTL autotune --------------------------------------------
   assert_eq "best MTU from a 1500 byte path" "$(state_get TUNNEL_MTU)" "1476"
   assert_eq "best TTL chosen"                "$(state_get TUNNEL_TTL)" "64"
-  assert_contains "MTU applied to the device" "$log" "link set dev gre-frp mtu 1476"
+  assert_contains "MTU applied to the device" "$log" "link set dev gft0 mtu 1476"
   assert_file "optimize log written" "$ENV/logs/optimize.log"
   assert_contains "optimize log records the mtu" "$(cat "$ENV/logs/optimize.log")" "mtu=1476"
   assert_contains "optimize log records the ttl" "$(cat "$ENV/logs/optimize.log")" "ttl=64"
@@ -337,7 +338,7 @@ t_install_iran() {
   assert_no_file "no frpc.toml on the relay" "$ENV/etc/frpc.toml"
   local frps; frps="$(cat "$ENV/etc/frps.toml")"
   assert_contains "frps binds to the tunnel IP only" "$frps" 'bindAddr = "10.99.99.1"'
-  assert_contains "frps control port" "$frps" "bindPort = 7000"
+  assert_contains "frps control port" "$frps" "bindPort = 40001"
   assert_contains "frps listens for proxies publicly" "$frps" 'proxyBindAddr = "0.0.0.0"'
   assert_contains "frps has the shared token" "$frps" "auth.token = \"$(state_get AUTH_TOKEN)\""
   assert_contains "udpPacketSize fits the MTU" "$frps" "udpPacketSize = 1444"
@@ -348,32 +349,32 @@ t_install_iran() {
 
   # --- systemd --------------------------------------------------------
   local unit
-  for unit in gre-frp-tunnel.service gre-frp-tunnel-optimize.service \
-              gre-frp-tunnel-optimize.timer gre-frp-tunnel-frpupdate.timer frps.service; do
+  for unit in gft-tunnel.service gft-tunnel-optimize.service \
+              gft-tunnel-optimize.timer gft-tunnel-frpupdate.timer frps.service; do
     assert_file "unit installed: $unit" "$ENV/units/$unit"
   done
-  assert_contains "unit points at the CLI" "$(cat "$ENV/units/gre-frp-tunnel.service")" "service-up"
-  assert_not_contains "unit placeholders replaced" "$(cat "$ENV/units/gre-frp-tunnel.service")" "__CLI__"
+  assert_contains "unit points at the CLI" "$(cat "$ENV/units/gft-tunnel.service")" "service-up"
+  assert_not_contains "unit placeholders replaced" "$(cat "$ENV/units/gft-tunnel.service")" "__CLI__"
   assert_contains "frps unit enabled" "$(cat "$ENV/stubtmp/systemctl.enabled")" "frps.service"
-  assert_contains "optimize timer enabled" "$(cat "$ENV/stubtmp/systemctl.enabled")" "gre-frp-tunnel-optimize.timer"
-  assert_contains "frp update timer enabled" "$(cat "$ENV/stubtmp/systemctl.enabled")" "gre-frp-tunnel-frpupdate.timer"
+  assert_contains "optimize timer enabled" "$(cat "$ENV/stubtmp/systemctl.enabled")" "gft-tunnel-optimize.timer"
+  assert_contains "frp update timer enabled" "$(cat "$ENV/stubtmp/systemctl.enabled")" "gft-tunnel-frpupdate.timer"
   assert_contains "frps started" "$(cat "$ENV/stubtmp/systemctl.active")" "frps.service"
 
   # --- sysctl ---------------------------------------------------------
-  assert_file "sysctl drop-in written" "$ENV/sysctl/99-gre-frp-tunnel.conf"
-  assert_contains "ip_forward enabled" "$(cat "$ENV/sysctl/99-gre-frp-tunnel.conf")" "net.ipv4.ip_forward = 1"
-  assert_contains "gre module loaded at boot" "$(cat "$ENV/modules/gre-frp-tunnel.conf" 2>/dev/null)" "gre"
+  assert_file "sysctl drop-in written" "$ENV/sysctl/99-gft-tunnel.conf"
+  assert_contains "ip_forward enabled" "$(cat "$ENV/sysctl/99-gft-tunnel.conf")" "net.ipv4.ip_forward = 1"
+  assert_contains "gre module loaded at boot" "$(cat "$ENV/modules/gft-tunnel.conf" 2>/dev/null)" "gre"
 
   # --- firewall -------------------------------------------------------
   local rules; rules="$(iptables_rules)"
   assert_contains "GRE (proto 47) allowed from the peer" "$rules" "-p gre -s 198.51.100.9 -j ACCEPT"
-  assert_contains "traffic on the tunnel interface allowed" "$rules" "-i gre-frp -j ACCEPT"
+  assert_contains "traffic on the tunnel interface allowed" "$rules" "-i gft0 -j ACCEPT"
   assert_contains "tcp 443 opened" "$rules" "-p tcp --dport 443 -j ACCEPT"
   assert_contains "udp 443 opened" "$rules" "-p udp --dport 443 -j ACCEPT"
   assert_contains "tcp 2053 opened" "$rules" "-p tcp --dport 2053 -j ACCEPT"
   assert_contains "udp 2053 opened" "$rules" "-p udp --dport 2053 -j ACCEPT"
-  assert_contains "control port restricted to the tunnel" "$rules" "-i gre-frp -p tcp --dport 7000 -j ACCEPT"
-  assert_contains "every rule is tagged" "$rules" "gre-frp-tunnel"
+  assert_contains "control port restricted to the tunnel" "$rules" "-i gft0 -p tcp --dport 40001 -j ACCEPT"
+  assert_contains "every rule is tagged" "$rules" "gft-tunnel"
   assert_not_contains "no DROP rule installed" "$rules" "-j DROP"
   assert_not_contains "no REJECT rule installed" "$rules" "-j REJECT"
   assert_contains "rules recorded for teardown" "$(cat "$ENV/state/firewall.rules")" "filter|INPUT|-p gre"
@@ -407,7 +408,7 @@ t_install_foreign() {
   assert_file "frpc.toml generated" "$ENV/etc/frpc.toml"
   local frpc; frpc="$(cat "$ENV/etc/frpc.toml")"
   assert_contains "frpc dials the Iranian tunnel IP" "$frpc" 'serverAddr = "10.99.99.1"'
-  assert_contains "frpc control port" "$frpc" "serverPort = 7000"
+  assert_contains "frpc control port" "$frpc" "serverPort = 40001"
   assert_contains "frpc uses the same token" "$frpc" "auth.token = \"$(state_get AUTH_TOKEN)\""
   # both servers derive it independently — this is the cross-host check
   assert_eq "the foreign side derived the relay's token on its own" \
@@ -436,7 +437,7 @@ t_install_foreign() {
   # firewall: only the tunnel, nothing public
   local rules; rules="$(iptables_rules)"
   assert_contains "GRE allowed from the peer" "$rules" "-p gre -s 203.0.113.10 -j ACCEPT"
-  assert_contains "tunnel interface allowed" "$rules" "-i gre-frp -j ACCEPT"
+  assert_contains "tunnel interface allowed" "$rules" "-i gft0 -j ACCEPT"
   assert_not_contains "no public 443 rule on the foreign side" "$rules" "--dport 443 -j ACCEPT"
   assert_eq "no MSS clamp on the foreign side" "$(iptables_mangle)" ""
 }
@@ -464,9 +465,9 @@ t_idempotent() {
   assert_eq "no duplicated keys in the state file" "$dupes" ""
   assert_gt "state file is not empty" "$(wc -l <"$ENV/state/config.env")" "10"
 
-  local gre_rules
-  gre_rules="$(grep -c -- '-p gre -s 198.51.100.9' "$ENV/stubtmp/iptables.filter.state")"
-  assert_eq "GRE rule not duplicated" "$gre_rules" "1"
+  local gft_gre_rules
+  gft_gre_rules="$(grep -c -- '-p gre -s 198.51.100.9' "$ENV/stubtmp/iptables.filter.state")"
+  assert_eq "GRE rule not duplicated" "$gft_gre_rules" "1"
   local port_rules
   port_rules="$(grep -c -- '--dport 443 -j ACCEPT' "$ENV/stubtmp/iptables.filter.state")"
   assert_eq "port rule not duplicated" "$port_rules" "2"
@@ -477,7 +478,7 @@ t_idempotent() {
 
   # the device is not recreated when it already exists
   local adds
-  adds="$(grep -c 'link add name gre-frp' "$ENV/stubtmp/ip.log")"
+  adds="$(grep -c 'link add name gft0' "$ENV/stubtmp/ip.log")"
   assert_eq "GRE device created only once" "$adds" "1"
 }
 
@@ -511,7 +512,7 @@ t_mtu_ttl() {
   seed_state iran 1476 64
   STUB_LOSS_AT_MTU="1476:50"
   export STUB_LOSS_AT_MTU
-  out="$(lib_run 'gre_ensure_up >/dev/null 2>&1; net_optimize_mtu >/dev/null 2>&1; echo "MTU=$(cfg_get TUNNEL_MTU)"')"
+  out="$(lib_run 'gft_gre_ensure_up >/dev/null 2>&1; net_optimize_mtu >/dev/null 2>&1; echo "MTU=$(cfg_get TUNNEL_MTU)"')"
   assert_contains "MTU stepped down away from the lossy value" "$out" "MTU=1468"
   unset STUB_LOSS_AT_MTU
 
@@ -520,9 +521,9 @@ t_mtu_ttl() {
   seed_state iran 1476 64
   STUB_LOSS_AT_TTL="64:50;128:0"
   export STUB_LOSS_AT_TTL
-  out="$(lib_run 'gre_ensure_up >/dev/null 2>&1; net_optimize_ttl >/dev/null 2>&1; echo "TTL=$(cfg_get TUNNEL_TTL)"')"
+  out="$(lib_run 'gft_gre_ensure_up >/dev/null 2>&1; net_optimize_ttl >/dev/null 2>&1; echo "TTL=$(cfg_get TUNNEL_TTL)"')"
   assert_contains "picked the loss-free TTL" "$out" "TTL=128"
-  assert_contains "the TTL was applied to the GRE device" "$(cat "$ENV/stubtmp/ip.state")" "devttl gre-frp 128"
+  assert_contains "the TTL was applied to the GRE device" "$(cat "$ENV/stubtmp/ip.state")" "devttl gft0 128"
   unset STUB_LOSS_AT_TTL
 
   # 7d. a filtered ICMP path still yields a usable MTU
@@ -589,13 +590,13 @@ t_safety() {
   assert_no_file "nothing was written when refusing" "$ENV/state/config.env"
 
   # the override is checked with a dry run: the guard must let it through
-  GRE_FRP_ALLOW_SSH_PORT=1
-  GRE_FRP_DRY_RUN=1
-  export GRE_FRP_ALLOW_SSH_PORT GRE_FRP_DRY_RUN
+  GFT_ALLOW_SSH_PORT=1
+  GFT_DRY_RUN=1
+  export GFT_ALLOW_SSH_PORT GFT_DRY_RUN
   run_cli install --role=iran --local-ip=203.0.113.10 --peer=198.51.100.9 --ports=22
   assert_rc "explicit override allows the SSH port" "$RC" "0"
   assert_contains "and warns about the risk" "$(cat "$ENV/out.txt")" "SSH may be shadowed"
-  unset GRE_FRP_ALLOW_SSH_PORT GRE_FRP_DRY_RUN
+  unset GFT_ALLOW_SSH_PORT GFT_DRY_RUN
 
   setup_env safety2
   run_cli install --role=iran --local-ip=203.0.113.10 --peer=203.0.113.10 --ports=443
@@ -615,7 +616,7 @@ t_safety() {
   assert_contains "help lists install" "$(cat "$ENV/out.txt")" "install"
   run_cli version
   assert_rc "version exits 0" "$RC" "0"
-  assert_contains "version prints the project version" "$(cat "$ENV/out.txt")" "GRE+FRP-TUNNEL"
+  assert_contains "version prints the project version" "$(cat "$ENV/out.txt")" "gft-TUNNEL"
   run_cli totally-unknown-command
   assert_rc "unknown command exits 2" "$RC" "2"
 }
@@ -768,17 +769,17 @@ t_test_command() {
 t_dry_run() {
   section "13. Dry run changes nothing"
   setup_env dry
-  GRE_FRP_DRY_RUN=1
-  export GRE_FRP_DRY_RUN
+  GFT_DRY_RUN=1
+  export GFT_DRY_RUN
   run_cli install --role=iran --local-ip=203.0.113.10 --peer=198.51.100.9 --ports=443
   assert_rc "dry-run install exits 0" "$RC" "0"
   assert_no_file "no state written" "$ENV/state/config.env"
-  assert_no_file "no unit written" "$ENV/units/gre-frp-tunnel.service"
+  assert_no_file "no unit written" "$ENV/units/gft-tunnel.service"
   assert_no_file "no frps config written" "$ENV/etc/frps.toml"
   assert_eq "no firewall change" "$(iptables_rules)" ""
   assert_eq "no device created" "$(cat "$ENV/stubtmp/ip.state" 2>/dev/null)" ""
-  assert_contains "the plan is printed" "$(cat "$ENV/out.txt")" "link add name gre-frp"
-  unset GRE_FRP_DRY_RUN
+  assert_contains "the plan is printed" "$(cat "$ENV/out.txt")" "link add name gft0"
+  unset GFT_DRY_RUN
 }
 
 # ============================================================
@@ -795,12 +796,12 @@ t_services() {
 
   run_cli service-down
   assert_rc "service-down exits 0" "$RC" "0"
-  assert_not_contains "device removed" "$(cat "$ENV/stubtmp/ip.state")" "dev gre-frp"
+  assert_not_contains "device removed" "$(cat "$ENV/stubtmp/ip.state")" "dev gft0"
 
   run_cli service-up
   assert_rc "service-up exits 0" "$RC" "0"
-  assert_contains "device recreated" "$(cat "$ENV/stubtmp/ip.state")" "dev gre-frp"
-  assert_contains "mtu reapplied" "$(cat "$ENV/stubtmp/ip.state")" "devmtu gre-frp"
+  assert_contains "device recreated" "$(cat "$ENV/stubtmp/ip.state")" "dev gft0"
+  assert_contains "mtu reapplied" "$(cat "$ENV/stubtmp/ip.state")" "devmtu gft0"
 
   run_cli status
   assert_rc "status exits 0" "$RC" "0"
@@ -833,10 +834,284 @@ t_uninstall() {
   assert_rc "uninstall exits 0" "$RC" "0"
   assert_eq "firewall rules removed" "$(iptables_rules)" ""
   assert_no_file "state directory removed" "$ENV/state/config.env"
-  assert_no_file "units removed" "$ENV/units/gre-frp-tunnel.service"
-  assert_no_file "sysctl drop-in removed" "$ENV/sysctl/99-gre-frp-tunnel.conf"
-  assert_not_contains "device removed" "$(cat "$ENV/stubtmp/ip.state" 2>/dev/null)" "dev gre-frp"
+  assert_no_file "units removed" "$ENV/units/gft-tunnel.service"
+  assert_no_file "sysctl drop-in removed" "$ENV/sysctl/99-gft-tunnel.conf"
+  assert_not_contains "device removed" "$(cat "$ENV/stubtmp/ip.state" 2>/dev/null)" "dev gft0"
   assert_contains "timers disabled" "$(cat "$ENV/out.txt")" "removed"
+}
+
+# ============================================================
+# 16. `set` — changing settings after the install
+# ============================================================
+t_set() {
+  section "16. Changing settings with set"
+  setup_env setcmd
+  seed_state foreign 1476 64
+
+  # --- the tunnel port -------------------------------------------------
+  run_cli set tunnel-port 40001
+  assert_rc "setting the same tunnel port is a no-op" "$RC" "0"
+  run_cli set tunnel-port 41000
+  assert_rc "tunnel port change exits 0" "$RC" "0"
+  assert_eq "tunnel port stored" "$(state_get CTRL_PORT)" "41000"
+  run_cli restart
+  assert_contains "frpc dials the new port" "$(cat "$ENV/etc/frpc.toml")" "serverPort = 41000"
+  run_cli set tunnel-port 70000
+  assert_ne "an invalid port is refused" "$RC" "0"
+
+  # --- tunnelled ports -------------------------------------------------
+  run_cli set ports "443,8443,2053"
+  assert_rc "port list change exits 0" "$RC" "0"
+  assert_eq "ports stored sorted and unique" "$(state_get TUNNEL_PORTS)" "443,2053,8443"
+  run_cli restart
+  local proxies
+  proxies="$(grep -c '^\[\[proxies\]\]' "$ENV/etc/frpc.toml")"
+  assert_eq "proxies regenerated for the new list" "$proxies" "6"
+  run_cli set ports "443"
+  local only
+  only="$(grep -c '^\[\[proxies\]\]' "$ENV/etc/frpc.toml")"
+  assert_eq "the old proxies are gone (no duplicates)" "$only" "2"
+  run_cli set ports 22
+  assert_ne "tunnelling SSH is still refused" "$RC" "0"
+
+  # --- the peer IP (how you repoint a foreign server at a new Iran IP) --
+  run_cli set peer-ip 198.51.100.77
+  assert_rc "peer IP change exits 0" "$RC" "0"
+  assert_eq "peer IP stored" "$(state_get PEER_PUBLIC_IP)" "198.51.100.77"
+  assert_contains "the GRE link was rebuilt for the new peer" "$(ip_log)" "remote 198.51.100.77"
+  assert_contains "the firewall now allows the new peer" "$(iptables_rules)" "-p gre -s 198.51.100.77 -j ACCEPT"
+  run_cli set peer-ip 203.0.113.10   # put it back (the original peer) for the checks below
+  assert_eq "peer IP can be changed back" "$(state_get PEER_PUBLIC_IP)" "203.0.113.10"
+  run_cli set peer-ip not-an-ip
+  assert_ne "a bogus peer IP is refused" "$RC" "0"
+  run_cli set local-ip "$(state_get PEER_PUBLIC_IP)"
+  assert_ne "a peer IP equal to ours is refused" "$RC" "0"
+
+  # --- tunnel IPs ------------------------------------------------------
+  run_cli set gre-remote 10.99.99.9
+  assert_eq "tunnel peer IP stored" "$(state_get GRE_IP_REMOTE)" "10.99.99.9"
+  assert_contains "address added on the rebuilt device" "$(ip_log)" "addr add 10.99.99.2/30 dev gft0"
+  run_cli set gre-remote "$(state_get GRE_IP_LOCAL)"
+  assert_ne "the two tunnel IPs may not be identical" "$RC" "0"
+
+  # --- MTU / TTL -------------------------------------------------------
+  run_cli set mtu 1400
+  assert_eq "MTU stored" "$(state_get TUNNEL_MTU)" "1400"
+  assert_contains "MTU applied to the device" "$(ip_log)" "link set dev gft0 mtu 1400"
+  run_cli set mtu 400
+  assert_ne "a too small MTU is refused" "$RC" "0"
+  run_cli set ttl 128
+  assert_eq "TTL stored" "$(state_get TUNNEL_TTL)" "128"
+  assert_contains "TTL applied to the device" "$(cat "$ENV/stubtmp/ip.state")" "devttl gft0 128"
+  run_cli set ttl 999
+  assert_ne "an out of range TTL is refused" "$RC" "0"
+
+  # --- the local panel address (foreign side) --------------------------
+  run_cli set target 10.77.0.5
+  assert_eq "panel address stored" "$(state_get LOCAL_TARGET_IP)" "10.77.0.5"
+  run_cli restart
+  assert_contains "frpc points at the new panel address" "$(cat "$ENV/etc/frpc.toml")" 'localIP = "10.77.0.5"'
+
+  # --- unknown key -----------------------------------------------------
+  run_cli set nonsense 1
+  assert_rc "an unknown setting exits 2" "$RC" "2"
+  assert_contains "and lists the known ones" "$(cat "$ENV/out.txt")" "known settings"
+
+  # --- nothing configured yet ------------------------------------------
+  setup_env setcmd_empty
+  run_cli set tunnel-port 40001
+  assert_ne "set refuses to run before install" "$RC" "0"
+
+  # --- the MSS clamp is an Iran-side concern ---------------------------
+  # It must follow a manual MTU change, and never leave a stale rule behind.
+  setup_env setcmd_iran
+  seed_state iran 1476 64
+  run_cli firewall apply
+  assert_contains "clamp starts at the seeded MTU" "$(iptables_mangle)" "--set-mss 1436"
+  run_cli set mtu 1400
+  assert_contains "the MSS clamp followed the manual MTU" "$(iptables_mangle)" "--set-mss 1360"
+  assert_eq "only one clamp rule exists" "$(grep -c -- '--set-mss' "$ENV/stubtmp/iptables.mangle.state")" "1"
+  assert_eq "the recorded MSS was updated" "$(state_get MSS_CLAMPED)" "1360"
+}
+
+# ============================================================
+# 17. The full-screen menu
+# ============================================================
+t_tui() {
+  section "17. Full-screen menu (scripted)"
+  setup_env tui
+  seed_state iran 1476 64
+  lib_run 'frp_install_latest' >/dev/null 2>&1
+  run_cli restart
+  GFT_NO_TTY=1
+  export GFT_NO_TTY
+
+  # the menu alone must open and quit cleanly
+  { printf '16\n' | bash "$CLI" menu; } >"$ENV/out.txt" 2>&1
+  RC=$?
+  assert_rc "menu opens and quits" "$RC" "0"
+  assert_contains "the header summarises the tunnel" "$(cat "$ENV/out.txt")" "tunnel port"
+  assert_contains "all entries are listed" "$(cat "$ENV/out.txt")" "Uninstall"
+  assert_contains "the summary shows the role" "$(cat "$ENV/out.txt")" "iran"
+
+  # EOF must quit instead of looping forever
+  { bash "$CLI" menu </dev/null; } >"$ENV/out.txt" 2>&1
+  assert_rc "menu quits on end of input" "$?" "0"
+
+  # a couple of items, then quit
+  { printf '7\n16\n' | bash "$CLI" menu; } >"$ENV/out.txt" 2>&1
+  assert_rc "menu item 7 (status) exits 0" "$?" "0"
+  assert_contains "item 7 printed the status" "$(cat "$ENV/out.txt")" "this server"
+  assert_contains "item 7 shows the tunnel port" "$(cat "$ENV/out.txt")" "tunnel port"
+
+  { printf '6\n16\n' | bash "$CLI" menu; } >"$ENV/out.txt" 2>&1
+  assert_contains "item 6 ran the connectivity test" "$(cat "$ENV/out.txt")" "Connectivity test"
+  assert_contains "and reported the peer" "$(cat "$ENV/out.txt")" "answers over the tunnel"
+
+  { printf '5\n16\n' | bash "$CLI" menu; } >"$ENV/out.txt" 2>&1
+  assert_contains "item 5 ran the optimizer" "$(cat "$ENV/out.txt")" "best MTU"
+
+  { printf '12\n16\n' | bash "$CLI" menu; } >"$ENV/out.txt" 2>&1
+  assert_contains "item 12 printed the configuration" "$(cat "$ENV/out.txt")" "ROLE=iran"
+
+  { printf '14\n16\n' | bash "$CLI" menu; } >"$ENV/out.txt" 2>&1
+  assert_contains "item 14 exported the peer config" "$(cat "$ENV/out.txt")" "frpc.toml.peer"
+
+  # submenu: ports → list → back
+  { printf '4\n1\n5\n16\n' | bash "$CLI" menu; } >"$ENV/out.txt" 2>&1
+  assert_rc "the ports submenu exits 0" "$?" "0"
+  assert_contains "the ports submenu lists ports" "$(cat "$ENV/out.txt")" "tunnelled ports"
+  assert_contains "and each port as TCP + UDP" "$(cat "$ENV/out.txt")" "443/tcp + 443/udp"
+
+  # submenu: firewall → show → back
+  { printf '13\n1\n4\n16\n' | bash "$CLI" menu; } >"$ENV/out.txt" 2>&1
+  assert_contains "the firewall submenu shows the rules" "$(cat "$ENV/out.txt")" "-p gre"
+
+  # editing through the menu: item 2 → peer IP → new value
+  { printf '2\n1\n198.51.100.77\n16\n' | bash "$CLI" menu; } >"$ENV/out.txt" 2>&1
+  assert_rc "editing through the menu exits 0" "$?" "0"
+  assert_eq "the menu edit changed the peer IP" "$(state_get PEER_PUBLIC_IP)" "198.51.100.77"
+  assert_contains "and reported the change" "$(cat "$ENV/out.txt")" "public IP (the peer)"
+
+  # item 3 is the dedicated tunnel-port editor
+  { printf '3\n41000\n16\n' | bash "$CLI" menu; } >"$ENV/out.txt" 2>&1
+  assert_eq "the tunnel port editor works" "$(state_get CTRL_PORT)" "41000"
+
+  unset GFT_NO_TTY
+}
+
+# ============================================================
+# 18. Self update
+# ============================================================
+t_update() {
+  section "18. Self update from GitHub"
+  setup_env selfupdate
+
+  if ! command -v git >/dev/null 2>&1; then
+    printf '  %s-%s git not available — skipping%s\n' "$C_Y" "$C_0" ""
+    return 0
+  fi
+
+  local origin="$ENV/origin.git" repo="$ENV/repo" dev="$ENV/dev"
+  case "$repo" in
+    "$WORK"/*) ;;
+    *) bad_msg "self-update safety check" "refusing to run outside the work dir"; return 1 ;;
+  esac
+
+  git init -q --bare "$origin" 2>/dev/null || { bad_msg "could not create a bare origin"; return 1; }
+  # the bare repo's default branch must be main, otherwise later clones check
+  # out an unborn master and the whole update flow cannot push/pull
+  git -C "$origin" symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+  git clone -q --no-hardlinks "$ROOT" "$ENV/seed" 2>/dev/null
+  git -C "$ENV/seed" -c user.name=t -c user.email=t@t push -q "$origin" main 2>/dev/null \
+    || { bad_msg "could not seed the bare origin"; return 1; }
+  git clone -q "$origin" "$repo" 2>/dev/null || { bad_msg "could not clone the origin"; return 1; }
+  git clone -q "$origin" "$dev" 2>/dev/null
+
+  # a newer commit upstream
+  printf '9.9.9\n' >"$dev/VERSION"
+  git -C "$dev" add VERSION
+  git -C "$dev" -c user.name=t -c user.email=t@t commit -q -m "bump version"
+  git -C "$dev" -c user.name=t -c user.email=t@t push -q origin main
+
+  # Point the CLI at the throw-away checkout and update it. The libraries are
+  # taken from the working tree so the test also works while the project has
+  # uncommitted edits (the bare origin only ever carries committed history).
+  export GFT_SELF_DIR="$repo"
+  export GFT_VERSION_FILE="$repo/VERSION"
+  export GFT_LIB_DIR="$ROOT/lib"
+  run_cli update
+  assert_rc "self update exits 0" "$RC" "0"
+  assert_contains "it reports the new revision" "$(cat "$ENV/out.txt")" "updated"
+  assert_eq "the checkout really moved" "$(cat "$repo/VERSION")" "9.9.9"
+
+  # a second run must be a no-op
+  run_cli update
+  assert_rc "a second update exits 0" "$RC" "0"
+  assert_contains "and reports being up to date" "$(cat "$ENV/out.txt")" "already on the newest version"
+
+  # local changes are protected
+  printf 'dirty\n' >>"$repo/VERSION"
+  run_cli update
+  assert_ne "local changes block the update" "$RC" "0"
+  assert_contains "and explain the way out" "$(cat "$ENV/out.txt")" "--force"
+  run_cli update --force
+  assert_rc "--force overwrites them" "$RC" "0"
+  assert_eq "VERSION restored from upstream" "$(cat "$repo/VERSION")" "9.9.9"
+
+  # not a git checkout
+  mkdir -p "$ENV/plain" && cp "$CLI" "$ENV/plain/gft"
+  export GFT_SELF_DIR="$ENV/plain"
+  export GFT_LIB_DIR="$ROOT/lib"          # keep the libs reachable so the CLI runs
+  export GFT_VERSION_FILE="$ROOT/VERSION"
+  run_cli update
+  assert_ne "a non-git copy cannot self update" "$RC" "0"
+  assert_contains "and says how to update instead" "$(cat "$ENV/out.txt")" "not a git checkout"
+
+  unset GFT_SELF_DIR GFT_LIB_DIR GFT_VERSION_FILE
+}
+
+# ============================================================
+# 19. Performance / lightness guards
+# ============================================================
+t_perf() {
+  section "19. Speed and lightness"
+  setup_env perf
+  seed_state iran 1476 64
+
+  # BBR + fq + mtu probing are written to the drop-in when the kernel offers
+  # them, and skipped cleanly when it does not
+  STUB_TCP_CC=bbr
+  export STUB_TCP_CC
+  run_cli firewall apply >/dev/null 2>&1
+  lib_run 'sysctl_setup' >/dev/null 2>&1
+  local conf; conf="$(cat "$ENV/sysctl/99-gft-tunnel.conf" 2>/dev/null)"
+  assert_contains "ip_forward is set" "$conf" "net.ipv4.ip_forward = 1"
+  assert_contains "loose rp_filter for tunnels" "$conf" "net.ipv4.conf.all.rp_filter = 2"
+  assert_contains "PMTU black hole detection" "$conf" "net.ipv4.tcp_mtu_probing = 1"
+  assert_contains "BBR is enabled when available" "$conf" "net.ipv4.tcp_congestion_control = bbr"
+  assert_contains "fq keeps bufferbloat down" "$conf" "net.core.default_qdisc = fq"
+  unset STUB_TCP_CC
+
+  # without BBR the drop-in stays minimal instead of failing
+  setup_env perf_nobbr
+  seed_state iran 1476 64
+  GFT_TCP_CC=none
+  export GFT_TCP_CC
+  lib_run 'sysctl_setup' >/dev/null 2>&1
+  conf="$(cat "$ENV/sysctl/99-gft-tunnel.conf" 2>/dev/null)"
+  assert_not_contains "no BBR line without kernel support" "$conf" "bbr"
+  assert_contains "forwarding still on" "$conf" "net.ipv4.ip_forward = 1"
+  unset GFT_TCP_CC
+
+  # the menu header must not run the heavy status probes
+  setup_env perf_header
+  seed_state iran 1476 64
+  local pings_before pings_after
+  pings_before="$(wc -l <"$ENV/stubtmp/ping.log" 2>/dev/null || echo 0)"
+  lib_run 'gft_summary' >/dev/null 2>&1
+  pings_after="$(wc -l <"$ENV/stubtmp/ping.log" 2>/dev/null || echo 0)"
+  assert_eq "the menu header does not ping the peer" "$pings_after" "$pings_before"
 }
 
 # ============================================================
@@ -844,10 +1119,11 @@ t_uninstall() {
 # ============================================================
 # All sections, in order. SECTIONS="idempotent mtu_ttl" runs a subset.
 ALL_SECTIONS="static unit_templates helpers install_iran install_foreign idempotent \
-mtu_ttl ports safety frp firewall test_command dry_run services uninstall"
+mtu_ttl ports safety frp firewall test_command dry_run services uninstall \
+set tui update perf"
 
 main() {
-  printf '%s\n' "${C_B}GRE+FRP-TUNNEL — smoke test suite${C_0}"
+  printf '%s\n' "${C_B}gft-TUNNEL — smoke test suite${C_0}"
   printf '%s\n' "${C_D}work dir: $WORK${C_0}"
 
   local s

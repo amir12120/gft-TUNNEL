@@ -1,0 +1,12 @@
+[Unit]
+Description=gft-TUNNEL — check for a newer frp release every day
+Documentation=https://github.com/amir12120/gft-TUNNEL
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+Unit=gft-tunnel-frpupdate.service
+
+[Install]
+WantedBy=timers.target

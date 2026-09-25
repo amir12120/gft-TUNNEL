@@ -1,10 +1,30 @@
 #!/usr/bin/env bash
 # ============================================================
 # test/stub/sysctl — logs every key it is asked to apply
+#
+# Read mode (`sysctl -n <key>`) answers capability probes so the
+# BBR/fq detection in lib/net.sh can be tested hermetically:
+#   STUB_TCP_CC=bbr   → the kernel advertises bbr
+#   STUB_TCP_CC=cubic → it does not (the default)
 # ============================================================
 S="${STUB_TMP:?STUB_TMP is not set}"
 mkdir -p "$S"
 echo "sysctl $*" >>"$S/sysctl.log"
+
+if [ "${1:-}" = "-n" ]; then
+  case "${2:-}" in
+    net.ipv4.tcp_available_congestion_control)
+      case "${STUB_TCP_CC:-cubic}" in
+        bbr) printf 'reno cubic bbr\n' ;;
+        *)   printf 'reno cubic\n' ;;
+      esac
+      ;;
+    net.ipv4.tcp_congestion_control) printf '%s\n' "${STUB_TCP_CC:-cubic}" ;;
+    net.core.default_qdisc)          printf '%s\n' "${STUB_QDISC:-fq_codel}" ;;
+  esac
+  exit 0
+fi
+
 for a in "$@"; do
   case "$a" in
     *=*) echo "$a" >>"$S/sysctl.applied" ;;

@@ -1,6 +1,6 @@
 [Unit]
-Description=GRE+FRP-TUNNEL — persistent GRE link between the Iran relay and the foreign server
-Documentation=https://github.com/amir12120/GRE-FRP-TUNNEL
+Description=gft-TUNNEL — persistent GRE link between the Iran relay and the foreign server
+Documentation=https://github.com/amir12120/gft-TUNNEL
 After=network-online.target
 Wants=network-online.target
 Before=frps.service frpc.service

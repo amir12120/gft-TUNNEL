@@ -1,52 +1,54 @@
 #!/usr/bin/env bash
 # ============================================================
-# GRE+FRP-TUNNEL — lib/common.sh
+# gft-TUNNEL — lib/common.sh
 # Logging, path resolution, state (config.env) handling,
 # interactive prompts and the menu helper.
 #
 # Everything that touches the filesystem goes through a
-# GRE_FRP_* variable so the test suite can point the whole CLI
+# GFT_* variable so the test suite can point the whole CLI
 # at a temporary directory and stub out ip/iptables/systemctl.
 # ============================================================
 
-[ -n "${GRE_FRP_COMMON_LOADED:-}" ] && return 0
-GRE_FRP_COMMON_LOADED=1
+[ -n "${GFT_COMMON_LOADED:-}" ] && return 0
+GFT_COMMON_LOADED=1
 
 # ------------------------------------------------------------
 # Paths — every one of them is overridable from the environment
-# (used by test/smoke.sh and by `GRE_FRP_DRY_RUN=1` runs).
+# (used by test/smoke.sh and by `GFT_DRY_RUN=1` runs).
 # ------------------------------------------------------------
-GRE_FRP_APP_NAME="GRE+FRP-TUNNEL"
-GRE_FRP_CLI_NAME="gre-frp-tunnel"
+GFT_APP_NAME="gft-TUNNEL"
+GFT_CLI_NAME="gft"
+GFT_NO_TTY="${GFT_NO_TTY:-0}"
+GFT_MENU_MODE=0
 
-GRE_FRP_STATE_DIR="${GRE_FRP_STATE_DIR:-/etc/gre-frp-tunnel}"
-GRE_FRP_LOG_DIR="${GRE_FRP_LOG_DIR:-/var/log/gre-frp-tunnel}"
-GRE_FRP_RUN_DIR="${GRE_FRP_RUN_DIR:-/run/gre-frp-tunnel}"
-GRE_FRP_FRP_ETC_DIR="${GRE_FRP_FRP_ETC_DIR:-/etc/frp}"
-GRE_FRP_BIN_DIR="${GRE_FRP_BIN_DIR:-/usr/local/bin}"
-GRE_FRP_SYSTEMD_DIR="${GRE_FRP_SYSTEMD_DIR:-/etc/systemd/system}"
-GRE_FRP_SYSCTL_DIR="${GRE_FRP_SYSCTL_DIR:-/etc/sysctl.d}"
-GRE_FRP_MODULES_LOAD_DIR="${GRE_FRP_MODULES_LOAD_DIR:-/etc/modules-load.d}"
+GFT_STATE_DIR="${GFT_STATE_DIR:-/etc/gft-tunnel}"
+GFT_LOG_DIR="${GFT_LOG_DIR:-/var/log/gft-tunnel}"
+GFT_RUN_DIR="${GFT_RUN_DIR:-/run/gft-tunnel}"
+GFT_FRP_ETC_DIR="${GFT_FRP_ETC_DIR:-/etc/frp}"
+GFT_BIN_DIR="${GFT_BIN_DIR:-/usr/local/bin}"
+GFT_SYSTEMD_DIR="${GFT_SYSTEMD_DIR:-/etc/systemd/system}"
+GFT_SYSCTL_DIR="${GFT_SYSCTL_DIR:-/etc/sysctl.d}"
+GFT_MODULES_LOAD_DIR="${GFT_MODULES_LOAD_DIR:-/etc/modules-load.d}"
 
-GRE_FRP_STATE_FILE="$GRE_FRP_STATE_DIR/config.env"
-GRE_FRP_LOG_FILE="$GRE_FRP_LOG_DIR/gre-frp-tunnel.log"
-GRE_FRP_OPT_LOG="$GRE_FRP_LOG_DIR/optimize.log"
-GRE_FRP_SYSCTL_FILE="$GRE_FRP_SYSCTL_DIR/99-gre-frp-tunnel.conf"
+GFT_STATE_FILE="$GFT_STATE_DIR/config.env"
+GFT_LOG_FILE="$GFT_LOG_DIR/gft-tunnel.log"
+GFT_OPT_LOG="$GFT_LOG_DIR/optimize.log"
+GFT_SYSCTL_FILE="$GFT_SYSCTL_DIR/99-gft-tunnel.conf"
 
 # Behaviour switches
-GRE_FRP_DRY_RUN="${GRE_FRP_DRY_RUN:-0}"          # 1 = print, never touch the host
-GRE_FRP_NONINTERACTIVE="${GRE_FRP_NONINTERACTIVE:-0}"
-GRE_FRP_ALLOW_NON_ROOT="${GRE_FRP_ALLOW_NON_ROOT:-0}"
-GRE_FRP_TUN_DEV="${GRE_FRP_TUN_DEV:-gre-frp}"
-GRE_FRP_SSH_PORT_GUARD="${GRE_FRP_SSH_PORT_GUARD:-1}"
+GFT_DRY_RUN="${GFT_DRY_RUN:-0}"          # 1 = print, never touch the host
+GFT_NONINTERACTIVE="${GFT_NONINTERACTIVE:-0}"
+GFT_ALLOW_NON_ROOT="${GFT_ALLOW_NON_ROOT:-0}"
+GFT_TUN_DEV="${GFT_TUN_DEV:-gft0}"
+GFT_SSH_PORT_GUARD="${GFT_SSH_PORT_GUARD:-1}"
 
 # Default tunnel parameters
-GRE_FRP_DEFAULT_NET="10.99.99"
-GRE_FRP_DEFAULT_GRE_IP_IRAN="10.99.99.1"
-GRE_FRP_DEFAULT_GRE_IP_FOREIGN="10.99.99.2"
-GRE_FRP_DEFAULT_CTRL_PORT="7000"
-GRE_FRP_DEFAULT_MTU="1472"
-GRE_FRP_DEFAULT_TTL="64"
+GFT_DEFAULT_NET="10.99.99"
+GFT_DEFAULT_GRE_IP_IRAN="10.99.99.1"
+GFT_DEFAULT_GRE_IP_FOREIGN="10.99.99.2"
+GFT_DEFAULT_CTRL_PORT="40001"
+GFT_DEFAULT_MTU="1472"
+GFT_DEFAULT_TTL="64"
 
 # ------------------------------------------------------------
 # Colours / logging
@@ -59,15 +61,15 @@ else
   C_R=''; C_G=''; C_Y=''; C_B=''; C_M=''; C_C=''; C_BOLD=''; C_DIM=''; C_0=''
 fi
 
-gre_frp_logfile_init() {
-  mkdir -p "$GRE_FRP_LOG_DIR" 2>/dev/null || true
-  [ -w "$GRE_FRP_LOG_DIR" ] || GRE_FRP_LOG_FILE="/dev/null"
+gft_logfile_init() {
+  mkdir -p "$GFT_LOG_DIR" 2>/dev/null || true
+  [ -w "$GFT_LOG_DIR" ] || GFT_LOG_FILE="/dev/null"
 }
 
 _log() {
   local lvl="$1"; shift
   printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$lvl" "$*" \
-    >>"$GRE_FRP_LOG_FILE" 2>/dev/null || true
+    >>"$GFT_LOG_FILE" 2>/dev/null || true
 }
 
 info()  { printf '%s %s\n' "${C_C}•${C_0}" "$*";    _log INFO "$*"; }
@@ -84,21 +86,23 @@ hr() { printf '%s\n' "${C_DIM}────────────────�
 banner() {
   printf '%s' "$C_M"
   cat <<'BANNER'
-   ____ ____  _____    _____ ____  ____     _____ _   _ _   _ _   _ _____ _
-  / ___|  _ \| ____|  |  ___|  _ \|  _ \   |_   _| | | | \ | | \ | | ____| |
- | |  _| |_) |  _|    | |_  | |_) | |_) |    | | | | | |  \| |  \| |  _| | |
- | |_| |  _ <| |___   |  _| |  _ <|  __/     | | | |_| | |\  | |\  | |___| |___
-  \____|_| \_\_____|  |_|   |_| \_\_|        |_|  \___/|_| \_|_| \_|_____|_____|
+       __ _  __ _| |_      _____ _   _ _   _ _   _ _____ _
+      / _` |/ _` | __|    |_   _| | | | \ | | \ | | ____| |
+     | (_| | (_| | |_       | | | | | |  \| |  \| |  _| | |
+      \__, |\__,_|\__|      | | | |_| | |\  | |\  | |___| |___
+      |___/                |_|  \___/|_| \_|_| \_|_____|_____|
 BANNER
   printf '%s' "$C_0"
-  dim "  GRE tunnel + reverse FRP tunnel for Iran ⇄ foreign servers"
+  dim "  fast GRE tunnel + reverse FRP tunnel for Iran ⇄ foreign servers"
+  dim "  v${GFT_VERSION:-dev}"
+  printf '\n'
 }
 
 # ------------------------------------------------------------
-# Running commands (honours GRE_FRP_DRY_RUN)
+# Running commands (honours GFT_DRY_RUN)
 # ------------------------------------------------------------
 run() {
-  if [ "$GRE_FRP_DRY_RUN" = "1" ]; then
+  if [ "$GFT_DRY_RUN" = "1" ]; then
     printf '%s+ %s%s\n' "$C_DIM" "$*" "$C_0"
     _log DRY "$*"
     return 0
@@ -118,19 +122,19 @@ quiet() { "$@" >/dev/null 2>&1; }
 # to change the host. In dry-run mode they only print.
 # ------------------------------------------------------------
 mut() {  # mutate, keep output
-  if [ "$GRE_FRP_DRY_RUN" = "1" ]; then printf '%s  + %s%s\n' "$C_DIM" "$*" "$C_0"; _log DRY "$*"; return 0; fi
+  if [ "$GFT_DRY_RUN" = "1" ]; then printf '%s  + %s%s\n' "$C_DIM" "$*" "$C_0"; _log DRY "$*"; return 0; fi
   "$@"
 }
 
 mutq() { # mutate, stay quiet
-  if [ "$GRE_FRP_DRY_RUN" = "1" ]; then printf '%s  + %s%s\n' "$C_DIM" "$*" "$C_0"; _log DRY "$*"; return 0; fi
+  if [ "$GFT_DRY_RUN" = "1" ]; then printf '%s  + %s%s\n' "$C_DIM" "$*" "$C_0"; _log DRY "$*"; return 0; fi
   "$@" >/dev/null 2>&1
 }
 
 # put_file PATH   — content arrives on stdin
 put_file() {
   local f="$1"
-  if [ "$GRE_FRP_DRY_RUN" = "1" ]; then
+  if [ "$GFT_DRY_RUN" = "1" ]; then
     printf '%s  + write %s%s\n' "$C_DIM" "$f" "$C_0"
     _log DRY "write $f"
     cat >/dev/null
@@ -147,36 +151,36 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # ------------------------------------------------------------
 require_root() {
   if [ "$(id -u)" = "0" ]; then return 0; fi
-  if [ "$GRE_FRP_ALLOW_NON_ROOT" = "1" ]; then
-    warn "not running as root — continuing because GRE_FRP_ALLOW_NON_ROOT=1"
+  if [ "$GFT_ALLOW_NON_ROOT" = "1" ]; then
+    warn "not running as root — continuing because GFT_ALLOW_NON_ROOT=1"
     return 0
   fi
-  if [ "$GRE_FRP_DRY_RUN" = "1" ]; then
-    warn "not running as root — continuing because GRE_FRP_DRY_RUN=1"
+  if [ "$GFT_DRY_RUN" = "1" ]; then
+    warn "not running as root — continuing because GFT_DRY_RUN=1"
     return 0
   fi
-  die "This command must be run as root (use: sudo $GRE_FRP_CLI_NAME $*)"
+  die "This command must be run as root (use: sudo $GFT_CLI_NAME $*)"
 }
 
 is_systemd() {
   # the smoke tests force this on/off so they behave the same everywhere
-  [ "${GRE_FRP_NO_SYSTEMD:-0}" = "1" ] && return 1
-  [ "${GRE_FRP_FORCE_SYSTEMD:-0}" = "1" ] && return 0
+  [ "${GFT_NO_SYSTEMD:-0}" = "1" ] && return 1
+  [ "${GFT_FORCE_SYSTEMD:-0}" = "1" ] && return 0
   have systemctl && [ -d /run/systemd/system ]
 }
 
-gre_frp_lock_init() {
-  mkdir -p "$GRE_FRP_RUN_DIR" 2>/dev/null || true
-  GRE_FRP_LOCK="$GRE_FRP_RUN_DIR/lock"
+gft_lock_init() {
+  mkdir -p "$GFT_RUN_DIR" 2>/dev/null || true
+  GFT_LOCK="$GFT_RUN_DIR/lock"
 }
 
 # ------------------------------------------------------------
 # State — a simple KEY=value file
 # ------------------------------------------------------------
 cfg_load() {
-  [ -f "$GRE_FRP_STATE_FILE" ] || return 0
+  [ -f "$GFT_STATE_FILE" ] || return 0
   # shellcheck disable=SC1090
-  . "$GRE_FRP_STATE_FILE"
+  . "$GFT_STATE_FILE"
 }
 
 # Indirect lookups go through eval on purpose: bash's ${!name} raises
@@ -187,7 +191,7 @@ cfg_has() {
   eval "[ -n \"\${$1+x}\" ]"
 }
 
-cfg_loaded() { [ -f "$GRE_FRP_STATE_FILE" ]; }
+cfg_loaded() { [ -f "$GFT_STATE_FILE" ]; }
 
 cfg_get() { # cfg_get KEY [default]
   local k="$1" d="${2:-}" v=""
@@ -205,7 +209,7 @@ cfg_is_set() { # true when KEY exists and is non-empty
 
 cfg_set_file() { # file key value
   local file="$1" k="$2" v="$3" tmp
-  if [ "$GRE_FRP_DRY_RUN" = "1" ]; then
+  if [ "$GFT_DRY_RUN" = "1" ]; then
     printf '%s  + %s: %s=%s%s\n' "$C_DIM" "$file" "$k" "$v" "$C_0"
     return 0
   fi
@@ -231,17 +235,42 @@ cfg_set_file() { # file key value
   rm -f "$tmp"
 }
 
-cfg_set() { cfg_set_file "$GRE_FRP_STATE_FILE" "$1" "$2"; }
+cfg_set() { cfg_set_file "$GFT_STATE_FILE" "$1" "$2"; }
 
 # ------------------------------------------------------------
 # Interaction
 # ------------------------------------------------------------
-gre_frp_interactive() {
-  [ "$GRE_FRP_NONINTERACTIVE" = "1" ] && return 1
+gft_interactive() {
+  [ "$GFT_NONINTERACTIVE" = "1" ] && return 1
+  [ "$GFT_NO_TTY" = "1" ] && return 1
   [ -t 0 ] && return 0
   # no tty on stdin: try /dev/tty
   [ -r /dev/tty ] && return 0
   return 1
+}
+
+# Reads one line into the named variable. Returns non-zero on EOF.
+# In menu mode (a scripted TUI session) the answers come from stdin, which
+# also makes the whole CLI scriptable.
+_read_line() {
+  local __v="$1" line=""
+  if [ "$GFT_MENU_MODE" = "1" ] || [ ! -r /dev/tty ]; then
+    IFS= read -r line || return 1
+  else
+    IFS= read -r line </dev/tty || return 1
+  fi
+  printf -v "$__v" '%s' "$line"
+  return 0
+}
+
+_ask() { # prints the prompt to a tty when possible, then reads a line
+  local text="$1" __v="$2"
+  if [ "$GFT_MENU_MODE" = "1" ] || [ -t 0 ] || [ ! -r /dev/tty ]; then
+    printf '%s' "$text"
+  else
+    printf '%s' "$text" >/dev/tty
+  fi
+  _read_line "$__v"
 }
 
 # prompt VAR "question" [default] [validate_fn]
@@ -249,14 +278,13 @@ prompt() {
   local __var="$1" q="$2" def="${3:-}" validator="${4:-}" ans=""
   local shown="$q"
   [ -n "$def" ] && shown="$q [${C_DIM}$def${C_0}]"
+  local asked=0 eof=0
   while :; do
-    if gre_frp_interactive; then
-      if [ -t 0 ]; then
-        printf '%s %s: ' "${C_C}?${C_0}" "$shown"
-        IFS= read -r ans || ans=""
+    if [ "$GFT_MENU_MODE" = "1" ] || gft_interactive; then
+      if _ask "${C_C}?${C_0} $shown: " ans; then
+        asked=$(( asked + 1 ))
       else
-        printf '%s %s: ' "${C_C}?${C_0}" "$shown" >/dev/tty
-        IFS= read -r ans </dev/tty || ans=""
+        eof=1; ans=""
       fi
     else
       ans=""
@@ -267,36 +295,32 @@ prompt() {
       return 0
     fi
     err "invalid value: ${ans:-<empty>}"
-    [ -n "$def" ] || { printf -v "$__var" '%s' ""; return 1; }
+    if [ "$eof" = "1" ] || [ -z "$def" ]; then
+      printf -v "$__var" '%s' ""
+      return 1
+    fi
+    [ "$asked" -gt 12 ] && { printf -v "$__var" '%s' "$def"; return 0; }
   done
 }
 
 # confirm "question" [default: y|n]  -> 0 yes / 1 no
 confirm() {
   local q="$1" def="${2:-y}" ans=""
-  if ! gre_frp_interactive; then
+  if [ "$GFT_MENU_MODE" != "1" ] && ! gft_interactive; then
     [ "$def" = "y" ] && return 0 || return 1
   fi
-  if [ -t 0 ]; then
-    printf '%s %s ' "${C_C}?${C_0}" "$q"
-    IFS= read -r ans || ans=""
-  else
-    printf '%s %s ' "${C_C}?${C_0}" "$q" >/dev/tty
-    IFS= read -r ans </dev/tty || ans=""
+  if ! _ask "${C_C}?${C_0} $q " ans; then
+    [ "$def" = "y" ] && return 0 || return 1
   fi
   ans="${ans:-$def}"
   case "$ans" in y|Y|yes|YES|بله|ب) return 0 ;; *) return 1 ;; esac
 }
 
 pause_enter() {
-  gre_frp_interactive || return 0
-  if [ -t 0 ]; then
-    printf '%s' "${C_DIM}— press Enter to continue —${C_0}"
-    IFS= read -r _ || true
-  else
-    printf '%s' "${C_DIM}— press Enter to continue —${C_0}" >/dev/tty
-    IFS= read -r _ </dev/tty || true
-  fi
+  [ "$GFT_MENU_MODE" = "1" ] && return 0
+  gft_interactive || return 0
+  printf '%s' "${C_DIM}— press Enter to continue —${C_0}"
+  _read_line _ || true
 }
 
 # _menu_draw <tty> <title> <selected-index> <items...>
@@ -321,14 +345,19 @@ menu() {
   local -a items=("$@")
   local i n=${#items[@]} sel=0
 
-  if ! gre_frp_interactive; then
+  if ! gft_interactive; then
+    # numbered fallback — also what `printf '7\n16\n' | gft menu` drives
+    GFT_MENU_MODE=1
     printf '%s\n' "$title" >&2
     for i in "${!items[@]}"; do
       printf '  %2d) %s\n' "$((i + 1))" "${items[$i]}" >&2
     done
     local ans=""
     printf 'choice: ' >&2
-    IFS= read -r ans </dev/tty 2>/dev/null || ans="1"
+    if ! _read_line ans; then
+      printf '%s' "-1"   # end of input → quit
+      return 0
+    fi
     case "$ans" in ''|*[!0-9]*) ans=1 ;; esac
     [ "$ans" -lt 1 ] && ans=1
     [ "$ans" -gt "$n" ] && ans="$n"

@@ -1,0 +1,1163 @@
+#!/usr/bin/env bash
+# ============================================================
+# gft-TUNNEL
+#
+# A GRE tunnel between an Iranian relay and a foreign server,
+# carrying a reverse FRP tunnel so that the VPN panel running on
+# the foreign box is reachable on the Iranian IP — better ping and
+# reachable from every Iranian ISP.
+#
+# Usage:  sudo gft                 full-screen menu
+#         sudo gft <command>
+#
+#   install        Guided setup (prerequisites, role, IPs, tunnel port, ports, frp)
+#   edit           Interactive editor for every tunnel setting
+#   set <k> <v>    Change one setting non-interactively (see below)
+#   status         Everything about the tunnel in one screen
+#   test           Connectivity checks (tunnel, control port, tunnelled ports)
+#   optimize       Recalculate the best MTU + TTL right now
+#   ports          add | remove | set | list  the tunnelled ports
+#   tunnel-port    Show or change the tunnel (control) port
+#   frp            update | version | token  (always the latest upstream release)
+#   update         Update gft-TUNNEL itself from GitHub
+#   restart        Restart the tunnel and the frp service
+#   logs           Show the tunnel / frp logs
+#   config         Print the active configuration
+#   export-peer    Write the peer server's frp config to a file
+#   firewall       apply | show | remove  the ACCEPT rules
+#   uninstall      Remove everything this tool installed
+#   help           This help
+#
+#   service-up     (internal, used by systemd)
+#   service-down   (internal, used by systemd)
+#
+# `set` accepts: peer-ip, local-ip, gre-local, gre-remote, tunnel-port,
+#                ports, target, mtu, ttl
+# ============================================================
+
+set -u
+
+# ------------------------------------------------------------
+# Locate ourselves (following the /usr/local/bin symlink)
+# ------------------------------------------------------------
+_gft_self="${BASH_SOURCE[0]}"
+while [ -h "$_gft_self" ]; do
+  _gft_dir="$(cd -P "$(dirname "$_gft_self")" && pwd)"
+  _gft_self="$(readlink "$_gft_self")"
+  case "$_gft_self" in
+    /*) ;;
+    *) _gft_self="$_gft_dir/$_gft_self" ;;
+  esac
+done
+GFT_SELF_DIR="${GFT_SELF_DIR:-$(cd -P "$(dirname "$_gft_self")" && pwd)}"
+export GFT_SELF_DIR
+GFT_CLI_PATH="${GFT_CLI_PATH:-${GFT_BIN_DIR:-/usr/local/bin}/gft}"
+export GFT_CLI_PATH
+
+GFT_LIB_DIR="${GFT_LIB_DIR:-$GFT_SELF_DIR/lib}"
+GFT_VERSION_FILE="${GFT_VERSION_FILE:-$GFT_SELF_DIR/VERSION}"
+
+# shellcheck source=lib/common.sh
+. "$GFT_LIB_DIR/common.sh"
+# shellcheck source=lib/prereq.sh
+. "$GFT_LIB_DIR/prereq.sh"
+# shellcheck source=lib/net.sh
+. "$GFT_LIB_DIR/net.sh"
+# shellcheck source=lib/frp.sh
+. "$GFT_LIB_DIR/frp.sh"
+# shellcheck source=lib/firewall.sh
+. "$GFT_LIB_DIR/firewall.sh"
+# shellcheck source=lib/units.sh
+. "$GFT_LIB_DIR/units.sh"
+
+gft_logfile_init
+gft_lock_init
+
+VERSION="$(cat "$GFT_VERSION_FILE" 2>/dev/null | head -1 || echo dev)"
+[ -n "$VERSION" ] || VERSION=dev
+GFT_VERSION="$VERSION"
+export GFT_VERSION
+
+# ------------------------------------------------------------
+# Options
+# ------------------------------------------------------------
+GFT_ASSUME_YES=0
+GFT_QUIET=0
+GFT_FORCE=0
+PARSE_REST=()
+
+# Fills PARSE_REST with the positional arguments. It deliberately does not
+# echo them: a command substitution would run in a subshell and the
+# GFT_ROLE / GFT_PORTS assignments made here would be lost.
+parse_opts() {
+  local a
+  PARSE_REST=()
+  for a in "$@"; do
+    case "$a" in
+      --yes|-y)            GFT_ASSUME_YES=1; export GFT_ASSUME_YES ;;
+      --quiet|-q)          GFT_QUIET=1 ;;
+      --dry-run)           GFT_DRY_RUN=1 ;;
+      --non-interactive)   GFT_NONINTERACTIVE=1 ;;
+      --no-tty)            GFT_NO_TTY=1 ;;
+      --force|-f)          GFT_FORCE=1 ;;
+      --role=*)            GFT_ROLE="${a#*=}" ;;
+      --peer=*)            GFT_PEER_PUBLIC="${a#*=}" ;;
+      --local-ip=*)        GFT_LOCAL_PUBLIC="${a#*=}" ;;
+      --ports=*)           GFT_PORTS="${a#*=}" ;;
+      -h|--help)           PARSE_REST+=(help) ;;
+      *)                   PARSE_REST+=("$a") ;;
+    esac
+  done
+  return 0
+}
+
+# when running under systemd, keep the output out of the journal noise
+quiet_output_guard() {
+  [ "$GFT_QUIET" = "1" ] || return 0
+  mkdir -p "$GFT_LOG_DIR" 2>/dev/null || true
+  exec >>"$GFT_LOG_FILE" 2>&1
+}
+
+# ------------------------------------------------------------
+# Setup wizard
+# ------------------------------------------------------------
+setup_collect() {
+  local detected="" role="${GFT_ROLE:-}" local_ip peer_ip gft_gre_local gft_gre_remote
+  local ctrl ports target_ip idx
+
+  if [ -z "$role" ]; then
+    if ! gft_interactive; then
+      die "non-interactive mode needs GFT_ROLE=iran|foreign (or --role=)"
+    fi
+    idx="$(menu "Which server are you installing on?" \
+      "Iran server (relay — VPN clients connect to this IP)" \
+      "Foreign server (hosts the VPN panel)")"
+    [ "$idx" = "-1" ] && return 1
+    [ "$idx" = "0" ] && role="iran" || role="foreign"
+  fi
+  case "$role" in
+    iran|foreign) ;;
+    *) die "role must be 'iran' or 'foreign' (got: $role)" ;;
+  esac
+  GFT_ROLE="$role"
+
+  step "Detecting the public IP"
+  detected="$(net_public_ip_detect || true)"
+  [ -n "$detected" ] && ok "detected: ${C_BOLD}${detected}${C_0}" \
+                     || warn "could not detect the public IP automatically"
+
+  local_ip="${GFT_LOCAL_PUBLIC:-}"
+  if [ -z "$local_ip" ] && gft_interactive; then
+    if [ -n "$detected" ] && confirm "Is ${C_BOLD}${detected}${C_0} this server's public IP? [Y/n]" y; then
+      local_ip="$detected"
+    fi
+    if [ -z "$local_ip" ]; then
+      prompt local_ip "Enter this server's public IP" "$detected" is_ipv4
+    fi
+  fi
+  [ -n "$local_ip" ] || die "no public IP given"
+  is_ipv4 "$local_ip" || die "not a valid IPv4 address: $local_ip"
+  if net_ip_is_local "$local_ip"; then
+    ok "public IP $local_ip is on this machine"
+  else
+    warn "public IP $local_ip is not configured on any interface here (NAT? VPN? typo?)"
+    if gft_interactive && ! confirm "Continue anyway?" y; then
+      return 1
+    fi
+  fi
+
+  peer_ip="${GFT_PEER_PUBLIC:-}"
+  if [ -z "$peer_ip" ]; then
+    gft_interactive || die "non-interactive mode needs the peer IP (GFT_PEER_PUBLIC or --peer=)"
+    prompt peer_ip "Enter the ${C_BOLD}OTHER${C_0} server's public IP" "" is_ipv4
+  fi
+  is_ipv4 "$peer_ip" || die "not a valid IPv4 address: $peer_ip"
+  [ "$peer_ip" != "$local_ip" ] || die "the peer IP is the same as this server's IP"
+
+  if [ "$role" = "iran" ]; then
+    gft_gre_local="${GFT_GRE_LOCAL:-$GFT_DEFAULT_GRE_IP_IRAN}"
+    gft_gre_remote="${GFT_GRE_REMOTE:-$GFT_DEFAULT_GRE_IP_FOREIGN}"
+  else
+    gft_gre_local="${GFT_GRE_LOCAL:-$GFT_DEFAULT_GRE_IP_FOREIGN}"
+    gft_gre_remote="${GFT_GRE_REMOTE:-$GFT_DEFAULT_GRE_IP_IRAN}"
+  fi
+  if gft_interactive; then
+    prompt gft_gre_local "Tunnel IP for ${C_BOLD}this${C_0} server" "$gft_gre_local" is_ipv4
+    prompt gft_gre_remote "Tunnel IP for the ${C_BOLD}peer${C_0}" "$gft_gre_remote" is_ipv4
+  fi
+  is_ipv4 "$gft_gre_local" || die "invalid tunnel IP: $gft_gre_local"
+  is_ipv4 "$gft_gre_remote" || die "invalid tunnel IP: $gft_gre_remote"
+  [ "$gft_gre_local" != "$gft_gre_remote" ] || die "the two tunnel IPs must differ"
+
+  step "Tunnel port"
+  ctrl="${GFT_CTRL_PORT:-$(cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT")}"
+  info "The default tunnel port is ${C_BOLD}${GFT_DEFAULT_CTRL_PORT}${C_0}."
+  info "It is used inside the GRE link only (frps ⇄ frpc) and is never exposed to clients,"
+  info "but both servers must use the same number."
+  if [ -n "${GFT_CTRL_PORT:-}" ]; then
+    dim "  using the tunnel port given on the command line: $ctrl"
+  elif ! confirm "Keep the default tunnel port ${GFT_DEFAULT_CTRL_PORT}? [Y/n]" y; then
+    prompt ctrl "Tunnel port (1-65535)" "$ctrl" is_port
+  else
+    ctrl="$GFT_DEFAULT_CTRL_PORT"
+  fi
+  is_port "$ctrl" || die "invalid tunnel port: $ctrl"
+  ok "tunnel port: ${C_BOLD}${ctrl}${C_0}"
+
+  target_ip="${GFT_LOCAL_TARGET_IP:-127.0.0.1}"
+  if [ "$role" = "foreign" ] && gft_interactive; then
+    prompt target_ip "Local address the panel listens on" "$target_ip" is_ipv4
+  fi
+  is_ipv4 "$target_ip" || die "invalid local target address: $target_ip"
+
+  step "Ports to tunnel (TCP + UDP)"
+  ports="${GFT_PORTS:-}"
+  if [ -z "$ports" ]; then
+    gft_interactive || die "non-interactive mode needs the port list (GFT_PORTS or --ports=)"
+    dim "  Enter every port at once, separated by commas. Contiguous ranges work too."
+    dim "  Examples:  443        443,8443,2053        2000-2010,443"
+    prompt ports "Ports to publish on the Iranian IP (comma separated)" "443" ports_validate
+  fi
+  ports_validate "$ports" || die "invalid port list: $ports"
+  ports="$(ports_list_csv "$ports")"
+  case ",$ports," in
+    *",$ctrl,"*)
+      warn "the tunnel port $ctrl is also in the tunnelled list — the frp control channel wins"
+      ;;
+  esac
+
+  local clash; clash="$(ports_ssh_conflict "$ports")"
+  if [ -n "$clash" ]; then
+    err "these ports would hijack SSH on the Iranian server: ${clash}"
+    if [ "${GFT_ALLOW_SSH_PORT:-0}" != "1" ]; then
+      die "pick different ports (or set GFT_ALLOW_SSH_PORT=1 to override — it can lock you out)"
+    fi
+    warn "GFT_ALLOW_SSH_PORT=1 — continuing even though SSH may be shadowed"
+  fi
+
+  GFT_CFG_ROLE="$role"
+  GFT_CFG_LOCAL="$local_ip"
+  GFT_CFG_PEER="$peer_ip"
+  GFT_CFG_GRE_LOCAL="$gft_gre_local"
+  GFT_CFG_GRE_REMOTE="$gft_gre_remote"
+  GFT_CFG_CTRL="$ctrl"
+  GFT_CFG_PORTS="$ports"
+  GFT_CFG_TARGET="$target_ip"
+
+  hr
+  printf '  role              : %s%s%s\n' "$C_BOLD" "$role" "$C_0"
+  printf '  this server IP    : %s\n' "$local_ip"
+  printf '  peer server IP    : %s\n' "$peer_ip"
+  printf '  tunnel IPs        : %s ⇄ %s\n' "$gft_gre_local" "$gft_gre_remote"
+  printf '  control port      : %s/tcp (inside the tunnel)\n' "$ctrl"
+  printf '  tunnelled ports   : %s  (%s ports × TCP+UDP)\n' "$ports" "$(ports_count "$ports")"
+  [ "$role" = "foreign" ] && printf '  panel on          : %s\n' "$target_ip"
+  hr
+
+  if gft_interactive && [ "$GFT_ASSUME_YES" != "1" ]; then
+    confirm "Apply this configuration?" y || { warn "aborted"; return 1; }
+  fi
+  return 0
+}
+
+setup_apply() {
+  step "Writing configuration"
+  cfg_set ROLE "$GFT_CFG_ROLE"
+  cfg_set LOCAL_PUBLIC_IP "$GFT_CFG_LOCAL"
+  cfg_set PEER_PUBLIC_IP "$GFT_CFG_PEER"
+  cfg_set GRE_IP_LOCAL "$GFT_CFG_GRE_LOCAL"
+  cfg_set GRE_IP_REMOTE "$GFT_CFG_GRE_REMOTE"
+  cfg_set GRE_PREFIX "$(cfg_get GRE_PREFIX 30)"
+  cfg_set CTRL_PORT "$GFT_CFG_CTRL"
+  cfg_set TUNNEL_PORTS "$GFT_CFG_PORTS"
+  cfg_set LOCAL_TARGET_IP "$GFT_CFG_TARGET"
+  cfg_set TUN_DEV "$GFT_TUN_DEV"
+  frp_token_resolve >/dev/null
+  cfg_set TUNNEL_MTU "$(cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU")"
+  cfg_set TUNNEL_TTL "$(cfg_get TUNNEL_TTL "$GFT_DEFAULT_TTL")"
+  ok "saved $GFT_STATE_FILE"
+
+  sysctl_setup
+  step "Bringing up the GRE tunnel"
+  gft_gre_ensure_up || warn "the GRE device could not be created yet"
+
+  step "Looking for the best MTU and TTL"
+  if gft_gre_peer_reachable; then
+    net_optimize_all || warn "autotuning did not complete"
+  else
+    warn "the peer does not answer on ${GFT_CFG_GRE_REMOTE} yet —"
+    warn "that is expected while the other server is not configured."
+    warn "keeping MTU=$(cfg_get TUNNEL_MTU) / TTL=$(cfg_get TUNNEL_TTL) for now;"
+    warn "the hourly optimizer will tune both as soon as the link is up."
+  fi
+  frp_udp_packet_size_lock_in >/dev/null
+  dim "UDP packet size fixed at $(frp_udp_packet_size) bytes (same on both servers)"
+
+  step "Firewall"
+  fw_report_backend
+  fw_apply || warn "firewall rules could not be applied"
+
+  step "Installing the latest frp"
+  frp_install_latest || warn "frp installation failed — the tunnel is up, only frp is missing"
+
+  step "Generating frp configuration"
+  frp_config_write
+
+  step "Installing systemd services"
+  units_install
+  units_reload || true
+  units_enable
+
+  step "Starting services"
+  services_start_verified || true
+
+  step "Result"
+  cmd_status || true
+  printf '\n'
+  ok "done — this server is configured as the ${C_BOLD}${GFT_CFG_ROLE}${C_0} side."
+  if [ "$GFT_CFG_ROLE" = "iran" ]; then
+    info "Now run this script on the FOREIGN server (${GFT_CFG_PEER}) with the same port list:"
+  else
+    info "Now run this script on the IRANIAN server (${GFT_CFG_PEER}) with the same port list:"
+  fi
+  dim "     GFT_PORTS=\"$GFT_CFG_PORTS\" ./install.sh"
+  if [ "$GFT_CFG_ROLE" = "iran" ]; then
+    info "Client (VPN) configs must point at THIS server's IP: ${C_BOLD}${GFT_CFG_LOCAL}${C_0}"
+  else
+    info "Client (VPN) configs must point at the IRANIAN IP: ${C_BOLD}${GFT_CFG_PEER}${C_0}"
+  fi
+  return 0
+}
+
+cmd_install() {
+  require_root "install"
+  banner
+  hr
+  prereq_install || die "prerequisites could not be installed"
+  setup_collect || return 1
+  setup_apply || return 1
+
+  # drop straight into the full menu once the install is done
+  if gft_interactive && [ "$GFT_ASSUME_YES" != "1" ] && [ "${GFT_NO_MENU:-0}" != "1" ]; then
+    printf '\n'
+    pause_enter
+    cmd_menu
+  fi
+  return 0
+}
+
+# ------------------------------------------------------------
+# Status
+# ------------------------------------------------------------
+cmd_status() {
+  local role dev mtu ttl ports
+  role="$(cfg_get ROLE)"
+  if [ -z "$role" ]; then
+    warn "not configured yet — run: sudo $GFT_CLI_NAME install"
+    return 1
+  fi
+  dev="$(cfg_get TUN_DEV "$GFT_TUN_DEV")"
+  mtu="$(cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU")"
+  ttl="$(cfg_get TUNNEL_TTL "$GFT_DEFAULT_TTL")"
+  ports="$(cfg_get TUNNEL_PORTS)"
+
+  hr
+  printf ' %s%s%s\n' "$C_BOLD" "$GFT_APP_NAME v$VERSION" "$C_0"
+  hr
+  printf '  role             : %s\n' "$role"
+  printf '  this server      : %s\n' "$(cfg_get LOCAL_PUBLIC_IP)"
+  printf '  peer server      : %s\n' "$(cfg_get PEER_PUBLIC_IP)"
+  printf '  tunnel IPs       : %s (local) ⇄ %s (peer)\n' "$(cfg_get GRE_IP_LOCAL)" "$(cfg_get GRE_IP_REMOTE)"
+  printf '  tunnel port      : %s/tcp (inside the tunnel only)\n' "$(cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT")"
+  printf '  device           : %s\n' "$dev"
+
+  if gft_gre_dev_exists; then
+    printf '  link             : %sup%s  mtu=%s ttl=%s\n' "$C_G" "$C_0" "$mtu" "$ttl"
+  else
+    printf '  link             : %sdown%s\n' "$C_R" "$C_0"
+  fi
+
+  local out replies loss
+  out="$(net_ping_host "$(cfg_get GRE_IP_REMOTE)" 4 2)"
+  replies="${out%% *}"; loss="${out##* }"
+  if [ "${replies:-0}" -gt 0 ]; then
+    printf '  peer over tunnel : %s✔%s %s/4 replies (loss %s%%)\n' "$C_G" "$C_0" "$replies" "$loss"
+  else
+    printf '  peer over tunnel : %s✘ no reply%s\n' "$C_R" "$C_0"
+  fi
+
+  printf '  autotune mtu     : %s (loss %s%%, updated %s)\n' \
+    "$(cfg_get TUNNEL_MTU_UPDATED never)" "$(cfg_get TUNNEL_MTU_LOSS '-')"
+  printf '  autotune ttl     : %s (loss %s%%, hops %s, updated %s)\n' \
+    "$(cfg_get TUNNEL_TTL_UPDATED never)" "$(cfg_get TUNNEL_TTL_LOSS '-')" "$(cfg_get TUNNEL_TTL_HOPS '?')"
+  printf '  ports (TCP+UDP)  : %s  (%s ports)\n' "${ports:-none}" "$(ports_count "$ports")"
+  printf '  frp version      : %s\n' "$(frp_installed_version || echo 'not installed')"
+  printf '  udp packet size  : %s bytes\n' "$(frp_udp_packet_size)"
+  printf '  auth token       : %s\n' "$(cfg_get AUTH_TOKEN | cut -c1-6)…"
+  hr
+  services_status
+  hr
+  return 0
+}
+
+# ------------------------------------------------------------
+# Optimize
+# ------------------------------------------------------------
+cmd_optimize() {
+  require_root "optimize"
+  if ! cfg_is_set ROLE; then
+    err "not configured yet — run: sudo $GFT_CLI_NAME install"
+    return 1
+  fi
+  step "Watchdog"
+  net_watchdog || warn "watchdog could not recover the link"
+  net_optimize_all || return 1
+  ok "MTU $(cfg_get TUNNEL_MTU) / TTL $(cfg_get TUNNEL_TTL) applied"
+  return 0
+}
+
+# ------------------------------------------------------------
+# Test
+# ------------------------------------------------------------
+cmd_test() {
+  local fails=0 role ports p peer_gre
+  role="$(cfg_get ROLE)"
+  [ -n "$role" ] || { err "not configured"; return 1; }
+  ports="$(cfg_get TUNNEL_PORTS)"
+  peer_gre="$(cfg_get GRE_IP_REMOTE)"
+
+  hr; step "Connectivity test"; hr
+
+  # 1. device
+  if gft_gre_dev_exists; then ok "GRE device $(cfg_get TUN_DEV) exists"
+  else err "GRE device is missing"; fails=$(( fails + 1 )); fi
+
+  # 2. unit
+  if is_systemd; then
+    if service_active gft-tunnel.service; then ok "gft-tunnel.service is active"
+    else warn "gft-tunnel.service is not active"; fi
+  fi
+
+  # 3. peer over the tunnel
+  local out replies loss
+  out="$(net_ping_host "$peer_gre" 5 2)"; replies="${out%% *}"; loss="${out##* }"
+  if [ "${replies:-0}" -gt 0 ]; then
+    ok "peer $peer_gre answers over the tunnel (loss ${loss}%)"
+  else
+    err "peer $peer_gre does not answer over the tunnel"
+    fails=$(( fails + 1 ))
+  fi
+
+  # 4. fragmentation check at the configured MTU
+  local mtu payload
+  mtu="$(cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU")"
+  payload=$(( mtu - 28 ))
+  if net_probe_payload "$peer_gre" "$payload" 2; then
+    ok "no fragmentation at mtu $mtu (payload $payload clean)"
+  else
+    warn "payload $payload did not go through — the optimizer will lower the MTU"
+  fi
+
+  # 5. control port
+  local ctrl
+  ctrl="$(cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT")"
+  if [ "$role" = "foreign" ]; then
+    if net_tcp_check "$(cfg_get GRE_IP_REMOTE)" "$ctrl" 3; then
+      ok "frp control port $ctrl reachable on the Iran side"
+    else
+      err "frp control port $ctrl is NOT reachable on $(cfg_get GRE_IP_REMOTE)"
+      fails=$(( fails + 1 ))
+    fi
+    if is_systemd && service_active frpc.service; then ok "frpc.service is running"
+    else warn "frpc.service is not running"; fi
+  else
+    if is_systemd && service_active frps.service; then ok "frps.service is running"
+    else warn "frps.service is not running"; fi
+    if have ss && ss -ltn 2>/dev/null | grep -q ":$ctrl "; then
+      ok "frps is listening on $ctrl"
+    else
+      warn "nothing is listening on $ctrl (yet)"
+    fi
+    for p in $(ports_parse "$ports" 2>/dev/null | head -5); do
+      if have ss && ss -ltn 2>/dev/null | grep -q ":$p "; then
+        ok "TCP $p is open on the Iranian IP"
+      else
+        warn "TCP $p is not listening on this server"
+      fi
+    done
+  fi
+
+  # 6. local target
+  if [ "$role" = "foreign" ]; then
+    local target; target="$(cfg_get LOCAL_TARGET_IP 127.0.0.1)"
+    if have ss && ss -ltn 2>/dev/null | grep -q ":$(ports_parse "$ports" 2>/dev/null | head -1) "; then
+      ok "the panel seems to listen on $target"
+    else
+      warn "nothing is listening on the first tunnelled port at $target"
+    fi
+  fi
+
+  hr
+  if [ "$fails" -eq 0 ]; then ok "all required checks passed"; return 0; fi
+  err "$fails check(s) failed"
+  return 1
+}
+
+# ------------------------------------------------------------
+# Ports / frp / misc commands
+# ------------------------------------------------------------
+cmd_ports() {
+  local action="${1:-list}"; shift || true
+  require_root "ports"
+  cfg_is_set ROLE || { err "not configured"; return 1; }
+  local current spec newp clash
+  current="$(cfg_get TUNNEL_PORTS)"
+
+  case "$action" in
+    list)
+      printf 'tunnelled ports (%s):\n' "$(ports_count "$current")"
+      for p in $(ports_parse "$current" 2>/dev/null); do printf '  %s/tcp + %s/udp\n' "$p" "$p"; done
+      ;;
+    add|remove|set)
+      spec="$*"
+      if [ -z "$spec" ]; then
+        if [ "$GFT_MENU_MODE" != "1" ] && ! gft_interactive; then
+          die "usage: $GFT_CLI_NAME ports $action <ports>"
+        fi
+        if [ "$action" = "add" ]; then
+          dim "  comma separated, ranges with -  (e.g. 443,8443,2053)"
+        fi
+        prompt spec "Ports to $action" "$([ "$action" = "remove" ] && echo "" || echo 443)" "" || true
+        [ -n "$spec" ] || { warn "nothing changed"; return 0; }
+      fi
+      ports_validate "$spec" || die "invalid port list: $spec"
+      case "$action" in
+        set)    newp="$(ports_list_csv "$spec")" ;;
+        add)
+          if [ -n "$current" ]; then
+            newp="$(ports_list_csv "$current,$spec")"
+          else
+            newp="$(ports_list_csv "$spec")"
+          fi
+          ;;
+        remove)
+          newp="$({ ports_parse "$current"; ports_parse "$spec"; } | sort -n | uniq -u | paste -sd, -)"
+          ;;
+      esac
+      [ -n "$newp" ] || die "that would leave no ports at all"
+      clash="$(ports_ssh_conflict "$newp")"
+      [ -n "$clash" ] && [ "${GFT_ALLOW_SSH_PORT:-0}" != "1" ] \
+        && die "refusing: port(s) ${clash} are used by SSH"
+      cfg_set TUNNEL_PORTS "$newp"
+      ok "ports updated: $newp"
+      frp_config_write
+      fw_apply || true
+      services_restart_role || true
+      ;;
+    *) die "usage: $GFT_CLI_NAME ports {list|add|remove|set}" ;;
+  esac
+}
+
+cmd_frp() {
+  local action="${1:-version}"
+  case "$action" in
+    version)
+      printf 'installed: %s\n' "$(frp_installed_version || echo none)"
+      printf 'latest   : %s\n' "$(frp_version_of "$(frp_latest_tag 2>/dev/null)" 2>/dev/null || echo unknown)"
+      ;;
+    update) cmd_update_frp ;;
+    token)  frp_token_resolve; printf '\n' ;;
+    *) die "usage: $GFT_CLI_NAME frp {version|update|token}" ;;
+  esac
+}
+
+cmd_update_frp() {
+  require_root "update-frp"
+  frp_update_if_needed || return 1
+  frp_config_write
+  services_restart_role || true
+  ok "frp service restarted"
+}
+
+cmd_restart() {
+  require_root "restart"
+  gft_gre_ensure_up || warn "GRE device problem"
+  frp_config_write
+  fw_apply || true
+  services_restart_role || true
+  is_systemd && sleep 2 && services_start_verified || true
+}
+
+cmd_logs() {
+  local n="${1:-40}"
+  hr; printf ' %s\n' "$GFT_LOG_FILE"; hr
+  [ -f "$GFT_LOG_FILE" ] && tail -n "$n" "$GFT_LOG_FILE"
+  hr; printf ' %s\n' "$GFT_OPT_LOG"; hr
+  [ -f "$GFT_OPT_LOG" ] && tail -n "$n" "$GFT_OPT_LOG"
+  hr; printf ' frps/frpc (journal)\n'; hr
+  if is_systemd; then
+    journalctl -u frps.service -u frpc.service -n "$n" --no-pager 2>/dev/null || true
+  fi
+}
+
+cmd_config() {
+  hr; printf ' configuration: %s\n' "$GFT_STATE_FILE"; hr
+  [ -f "$GFT_STATE_FILE" ] && cat "$GFT_STATE_FILE"
+  hr; printf ' frp: %s\n' "$GFT_FRP_ETC_DIR"; hr
+  local f
+  for f in "$GFT_FRP_ETC_DIR"/frps.toml "$GFT_FRP_ETC_DIR"/frpc.toml; do
+    [ -f "$f" ] && { printf '\n# ---- %s ----\n' "$f"; cat "$f"; }
+  done
+  hr
+}
+
+cmd_export_peer() {
+  require_root "export-peer"
+  local out
+  out="$(frp_config_write_peer_copy)"
+  if [ -f "$out" ]; then
+    ok "peer configuration written to $out"
+    dim "  copy it to the other server as /etc/frp/$( [ "$(cfg_get ROLE)" = "iran" ] && echo frpc.toml || echo frps.toml )"
+  else
+    warn "nothing was written"
+  fi
+}
+
+cmd_firewall() {
+  local action="${1:-apply}"
+  require_root "firewall"
+  case "$action" in
+    apply)  fw_report_backend; fw_apply ;;
+    show|status) fw_status ;;
+    remove) fw_remove ;;
+    *) die "usage: $GFT_CLI_NAME firewall {apply|show|remove}" ;;
+  esac
+}
+
+cmd_uninstall() {
+  require_root "uninstall"
+  gft_interactive && ! confirm "Remove ${GFT_APP_NAME} completely?" n && return 1
+  fw_remove || true
+  units_remove || true
+  gft_gre_destroy || true
+  sysctl_remove || true
+  local role; role="$(cfg_get ROLE)"
+  [ -n "$role" ] || role=iran
+  if [ "$role" = "iran" ]; then rm -f "$GFT_FRP_ETC_DIR/frps.toml" 2>/dev/null || true
+  else rm -f "$GFT_FRP_ETC_DIR/frpc.toml" 2>/dev/null || true; fi
+  [ "$GFT_DRY_RUN" = "1" ] || rm -rf "$GFT_STATE_DIR" 2>/dev/null || true
+  if [ "$GFT_BIN_DIR/gft" = "$GFT_CLI_PATH" ] && [ "$GFT_DRY_RUN" != "1" ]; then
+    rm -f "$GFT_BIN_DIR/gft" "$GFT_BIN_DIR/gre-frp-tunnel" 2>/dev/null || true
+  fi
+  ok "removed. frp binaries in $GFT_BIN_DIR were kept (delete them manually if you want)"
+  dim "  state dir: $GFT_STATE_DIR (removed)"
+}
+
+cmd_service_up() {
+  local rc=0
+  gft_gre_ensure_up || rc=1
+  fw_apply || true
+  [ "$rc" = "0" ] && ok "GRE tunnel is up (mtu $(cfg_get TUNNEL_MTU) / ttl $(cfg_get TUNNEL_TTL))"
+  return "$rc"
+}
+
+cmd_service_down() {
+  gft_gre_destroy || true
+  ok "GRE tunnel removed"
+}
+
+# ============================================================
+# Changing settings — one engine behind `gft set` and the menus
+# ============================================================
+GFT_SET_KEYS="peer-ip local-ip gre-local gre-remote tunnel-port ports target mtu ttl"
+
+set_label() { # <key>
+  local role; role="$(cfg_get ROLE)"
+  case "$1" in
+    peer-ip)
+      if [ "$role" = "iran" ]; then echo "Foreign server public IP (the peer)"
+      else echo "Iran server public IP (the peer)"; fi ;;
+    local-ip)    echo "This server's public IP" ;;
+    gre-local)   echo "Tunnel IP of this server" ;;
+    gre-remote)  echo "Tunnel IP of the peer" ;;
+    tunnel-port) echo "Tunnel (control) port" ;;
+    ports)       echo "Tunnelled ports (TCP + UDP)" ;;
+    target)      echo "Local panel address on this server" ;;
+    mtu)         echo "Tunnel MTU" ;;
+    ttl)         echo "Tunnel TTL" ;;
+    *)           echo "$1" ;;
+  esac
+}
+
+set_current() { # <key> -> current value
+  case "$1" in
+    peer-ip)     cfg_get PEER_PUBLIC_IP ;;
+    local-ip)    cfg_get LOCAL_PUBLIC_IP ;;
+    gre-local)   cfg_get GRE_IP_LOCAL ;;
+    gre-remote)  cfg_get GRE_IP_REMOTE ;;
+    tunnel-port) cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT" ;;
+    ports)       cfg_get TUNNEL_PORTS ;;
+    target)      cfg_get LOCAL_TARGET_IP 127.0.0.1 ;;
+    mtu)         cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU" ;;
+    ttl)         cfg_get TUNNEL_TTL "$GFT_DEFAULT_TTL" ;;
+    *)           echo "" ;;
+  esac
+}
+
+set_validate() { # <key> <value>
+  case "$1" in
+    peer-ip|local-ip|gre-local|gre-remote|target) is_ipv4 "$2" ;;
+    tunnel-port) is_port "$2" ;;
+    ports)       ports_validate "$2" ;;
+    mtu)         is_valid_mtu "$2" && [ "$2" -ge 576 ] ;;
+    ttl)         is_uint "$2" && [ "$2" -ge 1 ] && [ "$2" -le 255 ] ;;
+    *)           return 1 ;;
+  esac
+}
+
+set_hint() { # <key> -> example for the prompt
+  case "$1" in
+    ports) echo "comma separated, e.g. 443,8443,2053" ;;
+    mtu)   echo "1280-9000, lower it if packets are lost" ;;
+    ttl)   echo "1-255, 64 is a safe default" ;;
+    *)     echo "" ;;
+  esac
+}
+
+needs_device_rebuild() {
+  case "$1" in local-ip|peer-ip|gre-local|gre-remote) return 0 ;; *) return 1 ;; esac
+}
+
+# Applies the change to the host and brings everything back in sync
+set_apply() { # <key> <value>
+  local key="$1" value="$2"
+  case "$key" in
+    peer-ip)     cfg_set PEER_PUBLIC_IP "$value" ;;
+    local-ip)    cfg_set LOCAL_PUBLIC_IP "$value" ;;
+    gre-local)   cfg_set GRE_IP_LOCAL "$value" ;;
+    gre-remote)  cfg_set GRE_IP_REMOTE "$value" ;;
+    tunnel-port) cfg_set CTRL_PORT "$value" ;;
+    ports)       cfg_set TUNNEL_PORTS "$(ports_list_csv "$value")" ;;
+    target)      cfg_set LOCAL_TARGET_IP "$value" ;;
+    mtu)         cfg_set TUNNEL_MTU "$value" ;;
+    ttl)         cfg_set TUNNEL_TTL "$value" ;;
+  esac
+  ok "$(set_label "$key") → ${C_BOLD}${value}${C_0}"
+
+  if needs_device_rebuild "$key"; then
+    step "Rebuilding the GRE link"
+    gft_gre_destroy || true
+    gft_gre_ensure_up || warn "the GRE device could not be rebuilt"
+  fi
+
+  if [ "$key" = "ports" ] || [ "$key" = "tunnel-port" ]; then
+    # the firewall, the MSS clamp and frps all depend on these
+    frp_config_write
+    fw_apply || true
+  elif [ "$key" = "mtu" ]; then
+    gft_gre_ensure_up || true
+    gft_gre_set_mtu "$value" || warn "could not apply the new MTU"
+    # keep the MSS clamp in step with the new MTU, without stacking rules
+    fw_refresh_mss >/dev/null 2>&1 || true
+  elif [ "$key" = "ttl" ]; then
+    gft_gre_ensure_up || true
+    gft_gre_set_ttl "$value" || warn "could not apply the new TTL"
+  elif [ "$key" = "target" ]; then
+    frp_config_write
+  fi
+
+  case "$key" in
+    peer-ip|local-ip|gre-local|gre-remote)
+      # a new peer means a new path: retune and reconfigure
+      frp_config_write
+      fw_apply || true
+      step "Retuning for the new peer"
+      net_optimize_all || warn "autotuning did not complete"
+      ;;
+  esac
+
+  services_restart_role || true
+  return 0
+}
+
+cmd_set() { # [key] [value]
+  local key="${1:-}" value="${2:-}" label hint cur k idx clash
+  require_root "set"
+  cfg_is_set ROLE || { err "not configured yet — run: sudo $GFT_CLI_NAME install"; return 1; }
+
+  if [ -n "$key" ] && ! printf '%s' " $GFT_SET_KEYS " | grep -q " $key "; then
+    err "unknown setting: $key"
+    dim "  known settings: $GFT_SET_KEYS"
+    return 2
+  fi
+
+  # --- pick a setting -------------------------------------------------
+  if [ -z "$key" ]; then
+    if [ "$GFT_MENU_MODE" != "1" ] && ! gft_interactive; then
+      err "usage: $GFT_CLI_NAME set <key> <value>"
+      dim "  known settings: $GFT_SET_KEYS"
+      return 2
+    fi
+    local -a keys=(peer-ip local-ip gre-local gre-remote tunnel-port ports target mtu ttl)
+    local -a labels=()
+    for k in "${keys[@]}"; do
+      labels+=("$(set_label "$k")  [$(set_current "$k")]")
+    done
+    labels+=("Back")
+    idx="$(menu "Which setting do you want to change?" "${labels[@]}")"
+    [ "$idx" = "-1" ] && return 0
+    case "$idx" in ''|*[!0-9-]*) return 0 ;; esac
+    [ "$idx" -ge "${#keys[@]}" ] && return 0
+    key="${keys[$idx]}"
+  fi
+
+  label="$(set_label "$key")"
+  cur="$(set_current "$key")"
+  hint="$(set_hint "$key")"
+
+  # --- ask for the new value -----------------------------------------
+  if [ -z "$value" ]; then
+    if [ "$GFT_MENU_MODE" != "1" ] && ! gft_interactive; then
+      die "usage: $GFT_CLI_NAME set $key <value>"
+    fi
+    printf '  current %s: %s%s%s\n' "$key" "$C_BOLD" "$cur" "$C_0"
+    [ -n "$hint" ] && dim "  $hint"
+    if [ "$key" = "ports" ]; then
+      dim "  this replaces the whole list — use '$GFT_CLI_NAME ports add <ports>' to add"
+    fi
+    prompt value "New value for $label" "$cur" || return 1
+    [ -n "$value" ] || { warn "nothing changed"; return 0; }
+  fi
+
+  # --- validate ------------------------------------------------------
+  if ! set_validate "$key" "$value"; then
+    err "invalid value for $key: $value"
+    [ -n "$hint" ] && dim "  $hint"
+    return 1
+  fi
+  case "$key" in
+    ports)
+      value="$(ports_list_csv "$value")"
+      clash="$(ports_ssh_conflict "$value")"
+      if [ -n "$clash" ] && [ "${GFT_ALLOW_SSH_PORT:-0}" != "1" ]; then
+        err "refusing: port(s) ${clash} are used by SSH"
+        dim "  set GFT_ALLOW_SSH_PORT=1 to override — it can shadow your SSH login"
+        return 1
+      fi
+      [ -n "$value" ] || { err "that would leave no ports at all"; return 1; }
+      ;;
+    gre-local)
+      [ "$value" != "$(set_current gre-remote)" ] || { err "the two tunnel IPs must differ"; return 1; }
+      ;;
+    gre-remote)
+      [ "$value" != "$(set_current gre-local)" ] || { err "the two tunnel IPs must differ"; return 1; }
+      ;;
+    peer-ip)
+      [ "$value" != "$(cfg_get LOCAL_PUBLIC_IP)" ] || { err "the peer IP is this server's own IP"; return 1; }
+      ;;
+    local-ip)
+      [ "$value" != "$(cfg_get PEER_PUBLIC_IP)" ] || { err "that is the peer's public IP, not this server's"; return 1; }
+      ;;
+    tunnel-port)
+      case ",$(cfg_get TUNNEL_PORTS)," in
+        *",$value,"*) warn "that port is also in the tunnelled list" ;;
+      esac
+      ;;
+  esac
+
+  # --- nothing to do? ------------------------------------------------
+  if [ "$value" = "$cur" ]; then
+    dim "unchanged — nothing to do"
+    return 0
+  fi
+
+  if [ "$GFT_MENU_MODE" != "1" ] && gft_interactive && [ "$GFT_ASSUME_YES" != "1" ]; then
+    confirm "Apply: $label = $value ?" y || { warn "aborted"; return 1; }
+  fi
+  set_apply "$key" "$value"
+}
+
+# ============================================================
+# Editing menu — a thin front end over cmd_set
+# ============================================================
+cmd_edit() {
+  require_root "edit"
+  cfg_is_set ROLE || { err "not configured yet — run: sudo $GFT_CLI_NAME install"; return 1; }
+  local -a keys=(peer-ip local-ip gre-local gre-remote tunnel-port ports target mtu ttl)
+  local -a labels=()
+  local k idx
+  for k in "${keys[@]}"; do
+    labels+=("$(set_label "$k")  [$(set_current "$k")]")
+  done
+  labels+=("Back")
+  idx="$(menu "Edit tunnel settings" "${labels[@]}")"
+  [ "$idx" = "-1" ] && return 0
+  case "$idx" in ''|*[!0-9-]*) return 0 ;; esac
+  [ "$idx" -ge "${#keys[@]}" ] && return 0
+  cmd_set "${keys[$idx]}"
+}
+
+cmd_ports_menu() {
+  require_root "ports"
+  cfg_is_set ROLE || { err "not configured yet — run: sudo $GFT_CLI_NAME install"; return 1; }
+  local idx
+  idx="$(menu "Tunnelled ports" \
+    "List the tunnelled ports" \
+    "Add ports" \
+    "Remove ports" \
+    "Replace the whole list" \
+    "Back")"
+  case "$idx" in
+    "0") cmd_ports list ;;
+    "1") cmd_ports add ;;
+    "2") cmd_ports remove ;;
+    "3") cmd_set ports ;;
+    *)   return 0 ;;
+  esac
+}
+
+cmd_firewall_menu() {
+  require_root "firewall"
+  local idx
+  idx="$(menu "Firewall (ACCEPT-only rules)" \
+    "Show the rules" \
+    "Apply / repair the rules" \
+    "Remove the rules" \
+    "Back")"
+  case "$idx" in
+    "0") fw_status ;;
+    "1") fw_report_backend; fw_apply ;;
+    "2") fw_remove ;;
+    *)   return 0 ;;
+  esac
+}
+
+# ============================================================
+# Self update from GitHub
+# ============================================================
+cmd_self_update() {
+  require_root "update"
+  local force="${1:-}" dir="$GFT_SELF_DIR" before after newver
+  local ref="${GFT_UPDATE_REF:-main}"
+
+  if [ ! -d "$dir/.git" ]; then
+    warn "this copy is not a git checkout, so it cannot update itself"
+    dim "  reinstall with:"
+    dim "  curl -fsSL https://raw.githubusercontent.com/amir12120/gft-TUNNEL/main/install.sh | sudo bash"
+    return 1
+  fi
+  have git || { err "git is required for a self update"; return 1; }
+
+  before="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  info "current revision: ${C_BOLD}${before}${C_0} (v$VERSION)"
+
+  if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ] && [ "$force" != "--force" ]; then
+    err "this checkout has local changes — refusing to overwrite them"
+    dim "  keep them with: git -C $dir diff > /tmp/gft-local.patch"
+    dim "  or force the update with: $GFT_CLI_NAME update --force"
+    return 1
+  fi
+
+  if ! mutq git -C "$dir" fetch --depth 1 origin "$ref"; then
+    err "git fetch failed (no network?)"
+    return 1
+  fi
+  if [ "$(git -C "$dir" rev-parse HEAD 2>/dev/null)" = "$(git -C "$dir" rev-parse FETCH_HEAD 2>/dev/null)" ]; then
+    # --force also restores a dirty tree when we are already up to date
+    if [ "$force" = "--force" ] && [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+      mutq git -C "$dir" reset --hard FETCH_HEAD || { err "git reset failed"; return 1; }
+      ok "local changes discarded — already on the newest version (v$VERSION)"
+      return 0
+    fi
+    ok "already on the newest version (v$VERSION)"
+    return 0
+  fi
+  if ! mutq git -C "$dir" reset --hard FETCH_HEAD; then
+    err "git reset failed"
+    return 1
+  fi
+  after="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  newver="$(head -1 "$GFT_VERSION_FILE" 2>/dev/null)"
+  ok "updated ${before} → ${after} (v${newver:-unknown})"
+
+  if cfg_is_set ROLE; then
+    step "Refreshing the installed units"
+    units_install || true
+    units_reload || true
+    services_restart_role || true
+    ok "services restarted on the new version"
+  fi
+  dim "  note: the running menu still uses the old code — exit and reopen gft"
+  return 0
+}
+
+cmd_help() {
+  cat <<EOF
+${GFT_APP_NAME} v$VERSION
+
+  sudo $GFT_CLI_NAME                  full-screen menu (everything below is also in it)
+  sudo $GFT_CLI_NAME install          guided setup
+  sudo $GFT_CLI_NAME edit             interactive editor for every tunnel setting
+  sudo $GFT_CLI_NAME set <k> <v>      change one setting non-interactively
+  sudo $GFT_CLI_NAME status           show the tunnel state
+  sudo $GFT_CLI_NAME test             connectivity checks
+  sudo $GFT_CLI_NAME optimize         recalculate the best MTU + TTL now
+  sudo $GFT_CLI_NAME ports add 8443   add tunnelled ports (TCP + UDP)
+  sudo $GFT_CLI_NAME ports remove 8443
+  sudo $GFT_CLI_NAME ports list
+  sudo $GFT_CLI_NAME tunnel-port      show / change the tunnel (control) port
+  sudo $GFT_CLI_NAME frp update       install the latest frp release
+  sudo $GFT_CLI_NAME frp token        show the shared auth token
+  sudo $GFT_CLI_NAME update           update gft-TUNNEL itself from GitHub
+  sudo $GFT_CLI_NAME restart          restart tunnel + frp
+  sudo $GFT_CLI_NAME logs             tail the logs
+  sudo $GFT_CLI_NAME config           print the active configuration
+  sudo $GFT_CLI_NAME export-peer      write the peer's frp config to a file
+  sudo $GFT_CLI_NAME firewall show    inspect the ACCEPT rules
+  sudo $GFT_CLI_NAME uninstall        remove everything
+
+  set keys: $GFT_SET_KEYS
+
+Environment overrides (also used for unattended installs):
+  GFT_ROLE=iran|foreign      GFT_LOCAL_PUBLIC=1.2.3.4
+  GFT_PEER_PUBLIC=5.6.7.8    GFT_PORTS=443,2053
+  GFT_CTRL_PORT=40001        GFT_NONINTERACTIVE=1
+  GFT_TCP_CC=bbr|cubic|none  GFT_TUNE_NETWORK=0|1
+  GFT_DRY_RUN=1              (print everything, change nothing)
+EOF
+}
+
+# ------------------------------------------------------------
+# Cheap one-line summary for the menu header (state file only,
+# a single `ip` call — deliberately not the full status screen)
+# ------------------------------------------------------------
+gft_summary() {
+  local role
+  role="$(cfg_get ROLE)"
+  if [ -z "$role" ]; then
+    printf '  %snot configured yet%s — choose "Install / reconfigure this server"\n' "$C_Y" "$C_0"
+    return 0
+  fi
+  local link="${C_DIM}down${C_0}"
+  gft_gre_dev_exists && link="${C_G}up${C_0}"
+  local svc=""
+  if is_systemd; then
+    if [ "$role" = "iran" ]; then
+      service_active frps.service && svc="${C_G}frps running${C_0}" || svc="${C_DIM}frps stopped${C_0}"
+    else
+      service_active frpc.service && svc="${C_G}frpc running${C_0}" || svc="${C_DIM}frpc stopped${C_0}"
+    fi
+  fi
+  printf '  %s%s%s | this %s ⇄ peer %s | tunnel %s ⇄ %s | port %s\n' \
+    "$C_BOLD" "$role" "$C_0" \
+    "$(cfg_get LOCAL_PUBLIC_IP)" "$(cfg_get PEER_PUBLIC_IP)" \
+    "$(cfg_get GRE_IP_LOCAL)" "$(cfg_get GRE_IP_REMOTE)" \
+    "$(cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT")"
+  printf '  link %b | mtu %s ttl %s | ports %s | frp %s | %b\n' \
+    "$link" "$(cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU")" \
+    "$(cfg_get TUNNEL_TTL "$GFT_DEFAULT_TTL")" \
+    "$(cfg_get TUNNEL_PORTS)" "$(frp_installed_version || echo 'n/a')" "$svc"
+  printf '  v%s | %s\n' "$GFT_VERSION" "$GFT_STATE_FILE"
+}
+
+_menu_header() {
+  # clear without spawning a process
+  if [ -t 1 ] && [ "$GFT_MENU_MODE" != "1" ]; then
+    printf '\033[2J\033[H'
+  fi
+  banner
+  gft_summary
+  printf '\n'
+}
+
+cmd_menu() {
+  local idx
+  # menu() runs in a command substitution (its stdout is the chosen index),
+  # so its GFT_MENU_MODE=1 would stay in that subshell. Promote it here so the
+  # prompts opened by the menu (set/edit/ports) keep reading from stdin.
+  gft_interactive || GFT_MENU_MODE=1
+  while :; do
+    _menu_header
+    idx="$(menu "Choose an action" \
+      "Install / reconfigure this server" \
+      "Edit tunnel settings" \
+      "Change the tunnel port" \
+      "Manage tunnelled ports" \
+      "Recalculate the best MTU + TTL" \
+      "Connectivity test" \
+      "Status" \
+      "Update gft-TUNNEL from GitHub" \
+      "Update frp to the latest release" \
+      "Restart the tunnel and frp" \
+      "Show logs" \
+      "Show configuration" \
+      "Firewall rules" \
+      "Export the peer's frp config" \
+      "Uninstall" \
+      "Quit")"
+    case "$idx" in
+      -1|15) printf '\n'; return 0 ;;
+      0)  cmd_install ;;
+      1)  cmd_edit ;;
+      2)  cmd_set tunnel-port ;;
+      3)  cmd_ports_menu ;;
+      4)  cmd_optimize ;;
+      5)  cmd_test ;;
+      6)  cmd_status ;;
+      7)  cmd_self_update ;;
+      8)  cmd_update_frp ;;
+      9)  cmd_restart ;;
+      10) cmd_logs ;;
+      11) cmd_config ;;
+      12) cmd_firewall_menu ;;
+      13) cmd_export_peer ;;
+      14) cmd_uninstall ;;
+    esac
+    pause_enter
+  done
+}
+
+# ------------------------------------------------------------
+# Dispatch
+# ------------------------------------------------------------
+main() {
+  parse_opts "$@"
+  local cmd="menu"
+  if [ "${#PARSE_REST[@]}" -gt 0 ]; then
+    cmd="${PARSE_REST[0]}"
+    local -a rest=("${PARSE_REST[@]:1}")
+    # shellcheck disable=SC2048,SC2086
+    set -- ${rest[@]+"${rest[@]}"}
+  fi
+
+  case "$cmd" in
+    install)      cmd_install "$@" ;;
+    edit|settings) cmd_edit "$@" ;;
+    set)          cmd_set "$@" ;;
+    tunnel-port)  cmd_set tunnel-port "$@" ;;
+    status)       cmd_status "$@" ;;
+    test)         cmd_test "$@" ;;
+    optimize|mtu) cmd_optimize "$@" ;;
+    ports)        cmd_ports "$@" ;;
+    frp)          cmd_frp "$@" ;;
+    update-frp)   cmd_update_frp "$@" ;;
+    update|self-update)
+      if [ "$GFT_FORCE" = "1" ]; then cmd_self_update --force; else cmd_self_update "$@"; fi
+      ;;
+    restart|start) cmd_restart "$@" ;;
+    logs)         cmd_logs "$@" ;;
+    config)       cmd_config "$@" ;;
+    export-peer)  cmd_export_peer "$@" ;;
+    firewall|fw)  cmd_firewall "$@" ;;
+    uninstall|remove) cmd_uninstall "$@" ;;
+    service-up)   cmd_service_up "$@" ;;
+    service-down) cmd_service_down "$@" ;;
+    version|-v)   printf '%s v%s\n' "$GFT_APP_NAME" "$VERSION" ;;
+    help|-h|--help) cmd_help ;;
+    menu|"")      cmd_menu "$@" ;;
+    *)            err "unknown command: $cmd"; printf '\n'; cmd_help; exit 2 ;;
+  esac
+}
+
+quiet_output_guard
+main "$@"

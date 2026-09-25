@@ -1,0 +1,13 @@
+[Unit]
+Description=gft-TUNNEL — run the MTU/TTL optimizer every hour
+Documentation=https://github.com/amir12120/gft-TUNNEL
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+AccuracySec=30s
+Persistent=true
+Unit=gft-tunnel-optimize.service
+
+[Install]
+WantedBy=timers.target

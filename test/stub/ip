@@ -100,9 +100,9 @@ case "$full" in
   *"addr show"*"scope global"*)
     echo "1: lo    inet 127.0.0.1/8 scope host lo"
     echo "2: $IFACE    inet $PUBLIC_IP/24 brd 203.0.113.255 scope global $IFACE"
-    if dev_exists gre-frp; then
-      for a in $(dev_addrs gre-frp); do
-        echo "3: gre-frp    inet $a scope global gre-frp"
+    if dev_exists gft0; then
+      for a in $(dev_addrs gft0); do
+        echo "3: gft0    inet $a scope global gft0"
       done
     fi
     exit 0
@@ -142,9 +142,9 @@ case "$full" in
   *"link show"*)
     echo "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default"
     echo "2: $IFACE: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu $IFACE_MTU qdisc pfifo_fast state UP mode DEFAULT group default"
-    if dev_exists gre-frp; then
-      mtu="$(dev_mtu gre-frp)"; [ -n "$mtu" ] || mtu=1472
-      echo "9: gre-frp: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu $mtu qdisc noqueue state UNKNOWN mode DEFAULT group default"
+    if dev_exists gft0; then
+      mtu="$(dev_mtu gft0)"; [ -n "$mtu" ] || mtu=1472
+      echo "9: gft0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu $mtu qdisc noqueue state UNKNOWN mode DEFAULT group default"
     fi
     exit 0
     ;;
