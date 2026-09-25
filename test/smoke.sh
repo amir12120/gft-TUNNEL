@@ -1012,7 +1012,7 @@ t_update() {
     return 0
   fi
 
-  local origin="$ENV/origin.git" repo="$ENV/repo" dev="$ENV/dev"
+  local origin="$ENV/origin.git" repo="$ENV/repo" dev="$ENV/dev" f seed_out
   case "$repo" in
     "$WORK"/*) ;;
     *) bad_msg "self-update safety check" "refusing to run outside the work dir"; return 1 ;;
@@ -1022,11 +1022,26 @@ t_update() {
   # the bare repo's default branch must be main, otherwise later clones check
   # out an unborn master and the whole update flow cannot push/pull
   git -C "$origin" symbolic-ref HEAD refs/heads/main 2>/dev/null || true
-  git clone -q --no-hardlinks "$ROOT" "$ENV/seed" 2>/dev/null
-  # a CI checkout can be shallow or detached — normalise to a local main
-  git -C "$ENV/seed" checkout -q -B main 2>/dev/null || true
-  git -C "$ENV/seed" -c user.name=t -c user.email=t@t push -q "$origin" main 2>/dev/null \
-    || { bad_msg "could not seed the bare origin"; return 1; }
+
+  # Seed the origin from a fresh single-commit repository built out of the
+  # working tree. Cloning $ROOT directly would fail on a shallow CI checkout
+  # ("shallow update not allowed") and would also drop uncommitted edits.
+  mkdir -p "$ENV/seed"
+  while IFS= read -r f; do
+    mkdir -p "$ENV/seed/$(dirname "$f")"
+    { cp -p "$ROOT/$f" "$ENV/seed/$f" 2>/dev/null || cp "$ROOT/$f" "$ENV/seed/$f"; } || true
+  done < <(git -C "$ROOT" ls-files)
+  if ! seed_out="$(
+    cd "$ENV/seed" &&
+      git init -q &&
+      git add -A &&
+      git -c user.name=t -c user.email=t@t commit -q -m seed &&
+      git branch -M main &&
+      git -c user.name=t -c user.email=t@t push -q "$origin" main 2>&1
+  )"; then
+    bad_msg "could not seed the bare origin" "$seed_out"
+    return 1
+  fi
   git clone -q "$origin" "$repo" 2>/dev/null || { bad_msg "could not clone the origin"; return 1; }
   git clone -q "$origin" "$dev" 2>/dev/null
 
