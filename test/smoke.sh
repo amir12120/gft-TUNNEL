@@ -1023,6 +1023,8 @@ t_update() {
   # out an unborn master and the whole update flow cannot push/pull
   git -C "$origin" symbolic-ref HEAD refs/heads/main 2>/dev/null || true
   git clone -q --no-hardlinks "$ROOT" "$ENV/seed" 2>/dev/null
+  # a CI checkout can be shallow or detached — normalise to a local main
+  git -C "$ENV/seed" checkout -q -B main 2>/dev/null || true
   git -C "$ENV/seed" -c user.name=t -c user.email=t@t push -q "$origin" main 2>/dev/null \
     || { bad_msg "could not seed the bare origin"; return 1; }
   git clone -q "$origin" "$repo" 2>/dev/null || { bad_msg "could not clone the origin"; return 1; }

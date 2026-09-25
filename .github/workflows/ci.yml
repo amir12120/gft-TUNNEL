@@ -50,7 +50,18 @@ jobs:
       - name: Run the smoke test suite
         run: |
           chmod +x gft install.sh lib/*.sh test/*.sh test/stub/*
-          bash test/smoke.sh
+          set +e
+          bash test/smoke.sh > /tmp/smoke.log 2>&1
+          rc=$?
+          cat /tmp/smoke.log
+          if [ "$rc" -ne 0 ]; then
+            # surface the failing assertions as check-run annotations, which are
+            # readable through the API even when the raw log is not reachable
+            grep -E '  ✘|expected \[|failures:|    - ' /tmp/smoke.log | head -60 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            exit "$rc"
+          fi
 
       - name: Show the written configuration on failure
         if: failure()
