@@ -1,6 +1,8 @@
 [Unit]
 Description=frp server (frps) — gft-TUNNEL relay on the Iranian server
 Documentation=https://github.com/fatedier/frp
+# After= is essential: frps binds to the GRE tunnel IP, so the link must
+# exist first or the unit crashes in a restart loop at boot.
 After=network-online.target gft-tunnel.service
 Wants=network-online.target
 Requires=gft-tunnel.service

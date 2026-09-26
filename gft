@@ -145,6 +145,18 @@ setup_collect() {
   detected="$(net_public_ip_detect || true)"
   [ -n "$detected" ] && ok "detected: ${C_BOLD}${detected}${C_0}" \
                      || warn "could not detect the public IP automatically"
+  # Iranian servers commonly egress through a VPN/proxy/CGNAT, so the echo
+  # services can report a DIFFERENT (still valid-looking) IPv4 than the
+  # address the GRE tunnel will actually source from — the reason behind
+  # "the Iran IP was detected wrongly". Warn loudly when they disagree.
+  if [ -n "$detected" ]; then
+    net_echo_ip_compare "$detected"; rc=$?
+    if [ "$rc" = "1" ]; then
+      warn "the IP echo services report a different address than this server's interface"
+      warn "traffic may egress via a VPN/proxy — the GRE 'local' address is what counts"
+      dim "  double-check with: ip -4 route get 1.1.1.1"
+    fi
+  fi
 
   local_ip="${GFT_LOCAL_PUBLIC:-}"
   if [ -z "$local_ip" ] && gft_interactive; then
@@ -530,7 +542,10 @@ cmd_ports() {
         prompt spec "Ports to $action" "$([ "$action" = "remove" ] && echo "" || echo 443)" "" || true
         [ -n "$spec" ] || { warn "nothing changed"; return 0; }
       fi
-      ports_validate "$spec" || die "invalid port list: $spec"
+      # a re-install already converted the list once; joining here lets
+      # `gft ports remove 443,2053` work as one spec after an upgrade
+      # from older versions (where the wizard returned a joined list)
+      spec="${spec// /,}"
       case "$action" in
         set)    newp="$(ports_list_csv "$spec")" ;;
         add)
@@ -957,6 +972,17 @@ cmd_self_update() {
     dim "  or force the update with: $GFT_CLI_NAME update --force"
     return 1
   fi
+
+  # installs done via `curl … | sudo bash` clone with a token-embedded URL
+  # when the user hit a private fork; sanitise it so later fetches work
+  # without credentials (public repo)
+  local dirty_url
+  dirty_url="$(git -C "$dir" remote get-url origin 2>/dev/null || true)"
+  case "$dirty_url" in
+    https://*@github.com/*)
+      mutq git -C "$dir" remote set-url origin "https://github.com/${dirty_url#*@}" || true
+      ;;
+  esac
 
   if ! mutq git -C "$dir" fetch --depth 1 origin "$ref"; then
     err "git fetch failed (no network?)"

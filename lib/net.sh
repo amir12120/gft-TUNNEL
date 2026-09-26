@@ -15,18 +15,52 @@ GFT_NET_LOADED=1
 # ------------------------------------------------------------
 GFT_IP_ENDPOINTS="${GFT_IP_ENDPOINTS:-https://api.ipify.org https://ifconfig.me/ip https://ipinfo.io/ip https://icanhazip.com https://api.ip.sb/ip}"
 
+# Prints the IPv4 that best represents "the source address this server's
+# packets really use". The interface/route source address comes FIRST
+# because the GRE tunnel will literally use it as its `local` address; IP
+# echo services are only a fallback — on Iranian servers their answer can
+# be a *different, valid-looking* IPv4 when the egress leaves through a
+# VPN/proxy/CGNAT or an ISP intercept portal, which used to make the
+# installer record the wrong Iran IP.
 net_public_ip_detect() {
-  local url ip
+  local ip url
+  # 1. source address of the default route (what the outer GRE packets use)
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9][0-9.]*\).*/\1/p' | head -1)"
+  if is_ipv4 "$ip"; then printf '%s' "$ip"; return 0; fi
+  # 2. first global address on any interface — but never loopback and
+  #    never the tunnel's own addresses (a leftover gft0 must not win)
+  local skip1 skip2
+  skip1="$(cfg_get GRE_IP_LOCAL "$GFT_DEFAULT_GRE_IP_IRAN")"
+  skip2="$(cfg_get GRE_IP_REMOTE "$GFT_DEFAULT_GRE_IP_FOREIGN")"
+  while IFS= read -r ip; do
+    [ -n "$ip" ] || continue
+    case "$ip" in 127.*) continue ;; esac
+    if [ "$ip" = "$skip1" ] || [ "$ip" = "$skip2" ]; then continue; fi
+    printf '%s' "$ip"; return 0
+  done < <(net_local_ips)
+  # 3. IP echo services (last resort; may report a proxy/VPN egress address)
   for url in $GFT_IP_ENDPOINTS; do
     ip="$(curl -4 -fsS --max-time 6 "$url" 2>/dev/null | tr -d '\r\n\t ' || true)"
     case "$ip" in *[!0-9.]*) ip="" ;; esac
     if is_ipv4 "$ip"; then printf '%s' "$ip"; return 0; fi
-    dim "  source $url did not answer, trying next…"
+    # hints go to stderr: this function's stdout IS the detected address
+    printf '%s\n' "${C_DIM}  source $url did not answer, trying next…${C_0}" >&2
   done
-  # last resort: source address of the default route
-  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9][0-9.]*\).*/\1/p' | head -1)"
-  if is_ipv4 "$ip"; then printf '%s' "$ip"; return 0; fi
   return 1
+}
+
+# net_echo_ip_compare <ip> -> 0 = echo agrees, 1 = echo reports a DIFFERENT
+# address (egress via VPN/proxy/NAT), 2 = no echo service answered.
+net_echo_ip_compare() {
+  local want="$1" ip url
+  for url in $GFT_IP_ENDPOINTS; do
+    ip="$(curl -4 -fsS --max-time 6 "$url" 2>/dev/null | tr -d '\r\n\t ' || true)"
+    case "$ip" in *[!0-9.]*) ip="" ;; esac
+    if is_ipv4 "$ip"; then
+      [ "$ip" = "$want" ] && return 0 || return 1
+    fi
+  done
+  return 2
 }
 
 net_local_ips() {

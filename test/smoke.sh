@@ -110,6 +110,7 @@ setup_env() { # <name>
   export STUB_FRP_VERSION="0.99.0"
   export STUB_LISTEN="40001 443 2053"
   unset STUB_LOSS_AT_TTL STUB_LOSS_AT_MTU STUB_BAD_CHECKSUM STUB_FIREWALLD STUB_UFW STUB_TCP_OPEN
+  unset STUB_ECHO_IP STUB_NO_ROUTE STUB_NO_PUBLIC_IP
 
   PATH="$STUB_DIR:$PATH"
   export PATH
@@ -296,6 +297,41 @@ t_helpers() {
 
   out="$(lib_eval 'frp_udp_packet_size' )"
   assert_eq "udp packet size fits the default MTU" "$out" "1444"
+
+  # --- public IP detection --------------------------------------------
+  # the interface/route source address wins: the GRE 'local' address must
+  # match what the kernel will actually use, and IP echo services can
+  # report a proxy/VPN egress instead (the "wrong Iran IP" bug)
+  out="$(lib_eval 'net_public_ip_detect')"
+  assert_eq "public IP detection prefers the route source" "$out" "203.0.113.10"
+
+  setup_env ip_echo_mismatch
+  STUB_ECHO_IP="198.51.100.99"
+  export STUB_ECHO_IP
+  out="$(lib_eval 'net_public_ip_detect')"
+  assert_eq "an egress echo IP must not override the interface address" "$out" "203.0.113.10"
+  lib_run 'net_public_ip_detect >/dev/null; net_echo_ip_compare "$(cfg_get LOCAL_PUBLIC_IP)"; echo "cmp=$?"' >/dev/null 2>&1
+  out="$( cd "$ROOT" && STUB_TMP="$ENV/stubtmp" STUB_ECHO_IP=198.51.100.99 bash -c '
+    set -u; . lib/common.sh; . lib/net.sh
+    net_echo_ip_compare 203.0.113.10; echo "cmp=$?"' 2>/dev/null )"
+  assert_contains "echo disagreement is detected" "$out" "cmp=1"
+  unset STUB_ECHO_IP
+
+  setup_env ip_no_route
+  STUB_NO_ROUTE=1
+  export STUB_NO_ROUTE
+  out="$(lib_eval 'net_public_ip_detect')"
+  assert_eq "without a default route the interface address is used" "$out" "203.0.113.10"
+  unset STUB_NO_ROUTE
+
+  setup_env ip_echo_only
+  STUB_NO_ROUTE=1
+  STUB_NO_IFACE=1
+  STUB_NO_PUBLIC_IP=1
+  export STUB_NO_ROUTE STUB_NO_IFACE STUB_NO_PUBLIC_IP
+  out="$(lib_eval 'net_public_ip_detect || true')"
+  assert_eq "no route, no iface and no echo answer is a clean failure" "$out" ""
+  unset STUB_NO_ROUTE STUB_NO_IFACE STUB_NO_PUBLIC_IP
 }
 
 # ============================================================
@@ -378,6 +414,10 @@ t_install_iran() {
   assert_not_contains "no DROP rule installed" "$rules" "-j DROP"
   assert_not_contains "no REJECT rule installed" "$rules" "-j REJECT"
   assert_contains "rules recorded for teardown" "$(cat "$ENV/state/firewall.rules")" "filter|INPUT|-p gre"
+  # the relay publishes the tunnelled ports on its public IP; the collision
+  # guard must have checked what is already bound to them (the ss stub
+  # reports 443/2053 as listening, so a warning is expected here)
+  assert_contains "port collision guard ran on the relay" "$(cat "$ENV/out.txt")" "already bound by other services"
 
   # --- MSS clamp (keeps relayed TCP inside the tunnel MTU) ------------
   assert_contains "MSS is clamped for the tunnelled TCP ports" "$(iptables_mangle)" "--set-mss 1436"
@@ -434,11 +474,14 @@ t_install_foreign() {
     *) ok_msg "frps must not be enabled on the foreign server" ;;
   esac
 
-  # firewall: only the tunnel, nothing public
+  # firewall: only the tunnel, nothing public — the foreign side never
+  # publishes the tunnelled ports (frpc talks to the panel locally, so a
+  # public port here would bypass the tunnel entirely)
   local rules; rules="$(iptables_rules)"
   assert_contains "GRE allowed from the peer" "$rules" "-p gre -s 203.0.113.10 -j ACCEPT"
   assert_contains "tunnel interface allowed" "$rules" "-i gft0 -j ACCEPT"
   assert_not_contains "no public 443 rule on the foreign side" "$rules" "--dport 443 -j ACCEPT"
+  assert_not_contains "no public port rules at all on the foreign side" "$rules" "--dport"
   assert_eq "no MSS clamp on the foreign side" "$(iptables_mangle)" ""
 }
 
@@ -911,6 +954,10 @@ t_set() {
   assert_eq "panel address stored" "$(state_get LOCAL_TARGET_IP)" "10.77.0.5"
   run_cli restart
   assert_contains "frpc points at the new panel address" "$(cat "$ENV/etc/frpc.toml")" 'localIP = "10.77.0.5"'
+  # even with a non-localhost panel address the foreign side must not
+  # publish any tunnelled port — the tunnel is the only way in
+  assert_eq "panel ports stay private on the foreign side" \
+    "$(grep -c -- '--dport' "$ENV/stubtmp/iptables.filter.state")" "0"
 
   # --- unknown key -----------------------------------------------------
   run_cli set nonsense 1
@@ -1125,9 +1172,11 @@ t_perf() {
   setup_env perf_header
   seed_state iran 1476 64
   local pings_before pings_after
-  pings_before="$(wc -l <"$ENV/stubtmp/ping.log" 2>/dev/null || echo 0)"
+  pings_before=0
+  [ -f "$ENV/stubtmp/ping.log" ] && pings_before="$(wc -l <"$ENV/stubtmp/ping.log")"
   lib_run 'gft_summary' >/dev/null 2>&1
-  pings_after="$(wc -l <"$ENV/stubtmp/ping.log" 2>/dev/null || echo 0)"
+  pings_after=0
+  [ -f "$ENV/stubtmp/ping.log" ] && pings_after="$(wc -l <"$ENV/stubtmp/ping.log")"
   assert_eq "the menu header does not ping the peer" "$pings_after" "$pings_before"
 }
 

@@ -25,6 +25,48 @@ GFT_FW_TAG="gft-tunnel"
 GFT_FW_RULES_FILE="$GFT_STATE_DIR/firewall.rules"
 GFT_FW_MAX_MPORTS=15
 
+# ------------------------------------------------------------
+# Port collision guard (Iran relay side)
+#
+# The tunnelled ports are published on the Iranian public IP, so
+# anything already bound to one of them would keep the port and
+# silently starve the frp proxy. Listeners owned by frps/frpc
+# itself are fine (the tunnel working as intended) — anything else
+# is reported. An empty result means "no conflicts".
+# ------------------------------------------------------------
+ports_in_use() { # <ports-spec> -> "<port>/<proto> ..." held by OTHER services
+  local p proto line busy=""
+  have ss || return 0
+  for p in $(ports_parse "${1:-}" 2>/dev/null); do
+    for proto in tcp udp; do
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        # match the local address column exactly (":443 " or ":443" at EOL),
+        # so port 4430 never counts as 443
+        case "$line" in
+          *":$p "*|*":$p") ;;
+          *) continue ;;
+        esac
+        case "$line" in
+          # frp itself holding the port = the tunnel doing its job
+          *'"frps"'*|*'"frpc"'*) ;;
+          *) busy="$busy $p/$proto" ;;
+        esac
+        break   # one matching row per port/proto is enough
+      done < <(ss -"${proto:0:1}"lnpH 2>/dev/null)
+    done
+  done
+  printf '%s' "${busy# }"
+  return 0
+}
+
+fw_report_port_conflicts() {
+  local busy
+  busy="$(ports_in_use "$(cfg_get TUNNEL_PORTS)")"
+  [ -n "$busy" ] && warn "already bound by other services: ${busy}— these tunnelled ports will NOT reach the panel"
+  return 0
+}
+
 firewalld_active() {
   have firewall-cmd && firewall-cmd --state >/dev/null 2>&1
 }
@@ -75,14 +117,13 @@ fw_mss_specs() {
 # ------------------------------------------------------------
 # Emits one rule per line:  <table>|<chain>|<spec>
 fw_rule_specs() {
-  local role dev peer_pub gft_gre_remote ctrl ports p local_ip
+  local role dev peer_pub gft_gre_remote ctrl ports p
   role="$(cfg_get ROLE)"
   dev="$(cfg_get TUN_DEV "$GFT_TUN_DEV")"
   peer_pub="$(cfg_get PEER_PUBLIC_IP)"
   gft_gre_remote="$(cfg_get GRE_IP_REMOTE)"
   ctrl="$(cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT")"
   ports="$(cfg_get TUNNEL_PORTS)"
-  local_ip="$(cfg_get LOCAL_TARGET_IP "127.0.0.1")"
 
   # 1. GRE (IP protocol 47) from the peer only
   [ -n "$peer_pub" ] && printf 'filter|INPUT|-p gre -s %s -j ACCEPT\n' "$peer_pub"
@@ -100,17 +141,14 @@ fw_rule_specs() {
     # 5. and the MSS clamp that keeps relayed TCP inside the tunnel MTU
     fw_mss_specs
   else
-    # the foreign side only needs the peer to reach it; the panel itself
-    # is normally bound to localhost and needs no public rule at all
-    case "$local_ip" in
-      127.0.0.1|::1|localhost) : ;;
-      *)
-        for p in $(ports_parse "$ports" 2>/dev/null); do
-          printf 'filter|INPUT|-p tcp --dport %s -j ACCEPT\n' "$p"
-          printf 'filter|INPUT|-p udp --dport %s -j ACCEPT\n' "$p"
-        done
-        ;;
-    esac
+    # The foreign side opens NO tunnelled port publicly — by design.
+    # frpc dials the Iranian relay over the GRE link and then talks to
+    # the panel locally, so the panel ports stay private here and only
+    # the peer reaches this box (rules 1 and 2 above). Opening the ports
+    # publicly would bypass the tunnel entirely: a client hitting the
+    # foreign IP directly would reach the panel without ever passing
+    # through the Iranian relay.
+    :
   fi
 }
 
@@ -219,6 +257,11 @@ fw_recorded_table() { # <table>
 # ------------------------------------------------------------
 fw_apply() {
   fw_assert_safe || return 1
+
+  # On the relay the tunnelled ports are published on the public IP —
+  # surface anything that is already bound to them before it silently
+  # starves the frp proxies.
+  [ "$(cfg_get ROLE)" = "iran" ] && fw_report_port_conflicts
 
   # stale MSS clamps from an earlier MTU are removed before the new ones
   # are added, otherwise every hourly run would stack another rule

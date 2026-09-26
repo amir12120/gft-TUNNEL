@@ -1,6 +1,8 @@
 [Unit]
 Description=frp client (frpc) — gft-TUNNEL client on the foreign server
 Documentation=https://github.com/fatedier/frp
+# After= is essential: frpc dials the peer through the GRE link, so the
+# device must be up first or the unit crashes in a restart loop at boot.
 After=network-online.target gft-tunnel.service
 Wants=network-online.target
 Requires=gft-tunnel.service

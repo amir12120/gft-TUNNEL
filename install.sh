@@ -103,12 +103,30 @@ fi
 # -----------------------------------------------------------
 # Put it on PATH
 # -----------------------------------------------------------
+# Release archives and some git clients lose the executable bit — run
+# through bash so a fresh install can never die on "Permission denied".
 chmod +x "$SRC_DIR/gft" "$SRC_DIR/install.sh" 2>/dev/null || true
 chmod +x "$SRC_DIR"/lib/*.sh 2>/dev/null || true
 mkdir -p "$BIN_DIR"
 ln -sfn "$SRC_DIR/gft" "$BIN_DIR/gft"
 ln -sfn "$SRC_DIR/gft" "$BIN_DIR/gre-frp-tunnel"   # name used by v1.0.0
 ok "installed: $BIN_DIR/gft  (legacy alias: gre-frp-tunnel)"
+
+# final sanity check: the command must actually start
+if ! "$BIN_DIR/gft" version >/dev/null 2>&1; then
+  if bash "$BIN_DIR/gft" version >/dev/null 2>&1; then
+    warn "$BIN_DIR/gft is not executable — falling back to a bash wrapper"
+    # remove the symlinks first: writing through them would clobber the
+    # real CLI inside $SRC_DIR
+    rm -f "$BIN_DIR/gft" "$BIN_DIR/gre-frp-tunnel"
+    printf '#!/usr/bin/env bash\nexec bash "%s/gft" "$@"\n' "$SRC_DIR" >"$BIN_DIR/gft"
+    printf '#!/usr/bin/env bash\nexec bash "%s/gft" "$@"\n' "$SRC_DIR" >"$BIN_DIR/gre-frp-tunnel"
+    chmod +x "$BIN_DIR/gft" "$BIN_DIR/gre-frp-tunnel"
+  else
+    die "$BIN_DIR/gft does not run — send the output of 'bash -x $BIN_DIR/gft version' for support"
+  fi
+fi
+ok "gft starts correctly: $("$BIN_DIR/gft" version 2>/dev/null || bash "$BIN_DIR/gft" version 2>/dev/null)"
 
 # -----------------------------------------------------------
 # Hand over to the CLI

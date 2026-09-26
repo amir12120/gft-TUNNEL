@@ -107,7 +107,9 @@ EOF
     if [ "${STUB_NO_PUBLIC_IP:-0}" = "1" ]; then
       exit 7
     fi
-    printf '%s\n' "$PUBLIC_IP"
+    # STUB_ECHO_IP simulates an egress that is NOT the interface address
+    # (VPN/proxy/CGNAT): the echo services then disagree with `ip route`
+    printf '%s\n' "${STUB_ECHO_IP:-$PUBLIC_IP}"
     exit 0
     ;;
 

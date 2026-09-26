@@ -4,6 +4,55 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] — 2026-09-27
+
+Hardening release: correct public-IP detection on Iranian servers, boot-order
+fixes and port-collision safety.
+
+### Fixed
+- **Wrong public-IP detection (the "Iran IP is wrong" bug).** Detection relied
+  on IP echo services (ipify, ifconfig.me, …) and only fell back to the route
+  source address. On Iranian servers whose egress leaves through a VPN,
+  proxy, CGNAT or an ISP portal, the echo services return a *different but
+  valid-looking* IPv4 and the installer recorded the wrong address. The
+  detection now uses, in order: (1) the source address of the default route —
+  exactly the address the GRE tunnel will use as its `local` endpoint, (2) the
+  first global interface address that is not loopback and not one of the
+  tunnel's own addresses, (3) the echo services as a last resort. When the
+  echo services disagree with the interface address the installer now warns
+  loudly instead of silently writing the wrong IP.
+- `net_public_ip_detect` no longer leaks its progress hints into stdout (its
+  stdout is the detected address and callers captured the hints as part of it).
+- **Boot-order race**: `frps.service`/`frpc.service` `Require=` the GRE unit
+  but nothing pulled it in *before* them on boot; systemd could start frp
+  first and frps would crash-loop binding a tunnel IP that did not exist yet.
+  `gft-tunnel.service` now declares `Before=frps.service frpc.service`.
+- **The foreign side no longer opens the tunnelled ports publicly.** When the
+  panel target was not `127.0.0.1`, the firewall added public ACCEPT rules for
+  every tunnelled port on the foreign server — contradicting the documented
+  design and letting clients bypass the tunnel by hitting the foreign IP
+  directly. Only the Iranian relay publishes the ports now (TCP+UDP); the
+  foreign side stays reachable by the peer alone.
+- **Port collision guard on the Iranian relay**: before applying the firewall,
+  `gft` checks what is already bound to the tunnelled ports with `ss` and warns
+  loudly when another service holds one of them (frp's own listeners are
+  recognised and ignored). A held port used to silently starve the frp proxy.
+- Every script ships with the executable bit set in the git index, so
+  `git clone` + `sudo ./install.sh` cannot die on "Permission denied" on any
+  platform, and `install.sh` verifies the `gft` command actually starts,
+  falling back to a bash wrapper when the archive lost the exec bit.
+- `gft update` sanitises a token-embedded git remote left behind by a piped
+  install so later self-updates fetch without credentials.
+- The frp configs now spell out that `udpPacketSize` **must stay identical on
+  both servers** — it is the TCP/UDP synchronisation key of the tunnel.
+
+### Tests
+- New invariants: the foreign side installs **zero** public `--dport` rules
+  (also asserted after `set target`), the relay's collision guard runs during
+  the install, and public-IP detection prefers the route/interface source over
+  IP echo services — including the egress-mismatch, no-default-route and
+  no-address-at-all cases. The suite is now ~324 assertions.
+
 ## [1.1.0] — 2026-09-26
 
 Rename to **gft-TUNNEL** with the **`gft`** command, a full-screen manager and
