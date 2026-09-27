@@ -1179,9 +1179,14 @@ cmd_self_update() {
   ok "updated ${before} → ${after} (v${newver:-unknown})"
 
   if cfg_is_set ROLE; then
-    step "Refreshing the installed units"
+    step "Refreshing the installed units and configs"
     units_install || true
     units_reload || true
+    # regenerate the frp config so NEW template keys (e.g. loginFailExit,
+    # udpPacketSize) actually reach the running services — a plain code
+    # update used to leave the old config in place forever
+    frp_config_write || true
+    fw_apply || true
     services_restart_role || true
     ok "services restarted on the new version"
   fi

@@ -4,7 +4,18 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.1] — 2026-09-27
+
+### Fixed
+- **`gft update` now regenerates the frp config.** It used to reinstall the
+  systemd units and restart the services but leave `/etc/frp/frpc.toml` (or
+  `frps.toml`) untouched — so servers updated from older versions kept running
+  with a stale config, missing every option added since (the reported symptom:
+  the foreign log still said `With loginFailExit enabled` long after that
+  default changed). The update path now rewrites the config and re-applies the
+  firewall before restarting.
+
+## [1.2.0] — 2026-09-27
 
 ### Added
 - **`gft relay dnat|frp|show`** — a second relay mode next to frp: **kernel

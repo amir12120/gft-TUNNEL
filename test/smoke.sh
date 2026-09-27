@@ -1205,10 +1205,20 @@ t_update() {
   export GFT_SELF_DIR="$repo"
   export GFT_VERSION_FILE="$repo/VERSION"
   export GFT_LIB_DIR="$ROOT/lib"
+  # a configured ROLE is required for the post-update refresh to kick in
+  # (it regenerates the frp config — a plain code update used to leave the
+  # old config in place forever, so frp kept running with stale options
+  # like the pre-1.1.2 loginFailExit)
+  seed_state foreign 1476 64
+  run_cli restart   # write today's config with the current templates
   run_cli update
   assert_rc "self update exits 0" "$RC" "0"
   assert_contains "it reports the new revision" "$(cat "$ENV/out.txt")" "updated"
   assert_eq "the checkout really moved" "$(cat "$repo/VERSION")" "9.9.9"
+  assert_contains "the frp config was REGENERATED on update" \
+    "$(cat "$ENV/out.txt")" "Refreshing the installed units and configs"
+  assert_contains "the regenerated config carries current template keys" \
+    "$(cat "$ENV/etc/frpc.toml")" "loginFailExit = false"
 
   # a second run must be a no-op
   run_cli update
