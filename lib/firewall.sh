@@ -110,6 +110,9 @@ fw_mss_specs() {
   if [ -n "$chunk" ]; then
     printf 'mangle|PREROUTING|-p tcp --tcp-flags SYN,RST SYN -m multiport --dports %s -j TCPMSS --set-mss %s\n' "$chunk" "$mss"
   fi
+  # dnat mode: the panel's SYN-ACKs also need clamping (config-port as
+  # SOURCE port on the tunnel interface)
+  relay_extra_mss_specs
 }
 
 # ------------------------------------------------------------
@@ -140,7 +143,12 @@ fw_rule_specs() {
     done
     # 5. and the MSS clamp that keeps relayed TCP inside the tunnel MTU
     fw_mss_specs
+    # 6. dnat-mode extras: PREROUTING DNAT to the peer's tunnel address +
+    #    POSTROUTING SNAT so replies return through the tunnel
+    relay_rule_specs
   else
+    # 7. dnat-mode extras on the foreign side: local DNAT to the panel
+    relay_rule_specs
     # The foreign side opens NO tunnelled port publicly — by design.
     # frpc dials the Iranian relay over the GRE link and then talks to
     # the panel locally, so the panel ports stay private here and only

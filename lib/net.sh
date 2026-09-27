@@ -575,6 +575,10 @@ sysctl_settings() {
   echo "net.ipv4.ip_forward = 1"
   echo "net.ipv4.conf.all.rp_filter = 2"
   echo "net.ipv4.conf.default.rp_filter = 2"
+  # dnat relay mode: the foreign side may DNAT to a panel on 127.0.0.1;
+  # the kernel refuses to route to loopback unless this is allowed.
+  echo "net.ipv4.conf.all.route_localnet = 1"
+  echo "net.ipv4.conf.default.route_localnet = 1"
   if [ "${GFT_TUNE_NETWORK:-1}" = "1" ]; then
     echo "net.ipv4.tcp_mtu_probing = 1"
     if sysctl_supports_bbr; then

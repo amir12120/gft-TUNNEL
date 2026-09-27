@@ -186,7 +186,7 @@ seed_state() { # [role] [mtu] [ttl] [ports]
 lib_run() {
   ( cd "$ROOT" && bash -c "
     set -u
-    . lib/common.sh; . lib/net.sh; . lib/frp.sh; . lib/firewall.sh; . lib/units.sh
+    . lib/common.sh; . lib/net.sh; . lib/frp.sh; . lib/firewall.sh; . lib/relay.sh; . lib/units.sh
     $1" ) 2>&1
 }
 install_foreign() {
@@ -263,7 +263,7 @@ t_helpers() {
   lib_eval() {
     ( cd "$ROOT" && bash -c '
       set -u
-      . lib/common.sh; . lib/net.sh; . lib/frp.sh; . lib/firewall.sh
+      . lib/common.sh; . lib/net.sh; . lib/frp.sh; . lib/firewall.sh; . lib/relay.sh
       '"$1" )
   }
 
@@ -853,6 +853,61 @@ t_doctor() {
 }
 
 # ============================================================
+# 12c. kernel-DNAT relay mode (no ports on the foreign side at all)
+# ============================================================
+t_relay_dnat() {
+  section "12c. Kernel DNAT relay mode"
+
+  # --- Iran side -------------------------------------------------------
+  setup_env relay_iran
+  seed_state iran 1476 64 "2083,2096,10285,10286,30004,30005,30006"
+  run_cli relay dnat
+  assert_rc "relay dnat exits 0 on the relay" "$RC" "0"
+  assert_contains "mode stored" "$(cat "$ENV/out.txt")" "relay mode: dnat"
+
+  local nat; nat="$(cat "$ENV/stubtmp/iptables.nat.state" 2>/dev/null)"
+  assert_contains "Iran DNATs the config port into the tunnel" "$nat" "--dport 2083 -j DNAT --to-destination 10.99.99.2:2083"
+  assert_contains "Iran DNATs UDP too" "$nat" "-p udp --dport 2083 -j DNAT"
+  assert_contains "Iran SNATs replies so they return through the tunnel" "$nat" "-j SNAT --to-source 10.99.99.1"
+  assert_contains "Iran accepts forwarded tunnel traffic" "$(iptables_rules)" "-o gft0 -j ACCEPT"
+
+  local mangle; mangle="$(cat "$ENV/stubtmp/iptables.mangle.state" 2>/dev/null)"
+  assert_contains "the panel's SYN-ACKs are clamped (sports direction)" "$mangle" "--sports 2083"
+
+  # frps must be off in dnat mode
+  case "$(cat "$ENV/stubtmp/systemctl.active" 2>/dev/null)" in
+    *frps.service*) bad_msg "frps must NOT run in dnat mode" ;;
+    *) ok_msg "frps must NOT run in dnat mode" ;;
+  esac
+
+  # the public INPUT rules for the config ports stay (users connect to them)
+  assert_contains "config ports still open on the Iranian public IP" "$(iptables_rules)" "-p tcp --dport 2083 -j ACCEPT"
+
+  # --- Foreign side ----------------------------------------------------
+  setup_env relay_foreign
+  seed_state foreign 1476 64 "2083,2096,10285,10286,30004,30005,30006"
+  run_cli relay dnat
+  assert_rc "relay dnat exits 0 on the foreign side" "$RC" "0"
+
+  local fnat; fnat="$(cat "$ENV/stubtmp/iptables.nat.state" 2>/dev/null)"
+  assert_contains "foreign DNATs the tunnel traffic to the local panel" "$fnat" "-i gft0 -p tcp --dport 2083 -j DNAT --to-destination 127.0.0.1:2083"
+
+  local frules; frules="$(iptables_rules)"
+  assert_not_contains "foreign still publishes NO public port" "$frules" "--dport"
+  case "$(cat "$ENV/stubtmp/systemctl.active" 2>/dev/null)" in
+    *frpc.service*) bad_msg "frpc must NOT run in dnat mode" ;;
+    *) ok_msg "frpc must NOT run in dnat mode" ;;
+  esac
+
+  # --- back to frp ------------------------------------------------------
+  run_cli relay frp
+  assert_rc "switching back to frp exits 0" "$RC" "0"
+  assert_contains "frpc enabled again" "$(cat "$ENV/stubtmp/systemctl.enabled")" "frpc.service"
+  run_cli restart
+  assert_contains "frpc.toml written again in frp mode" "$(cat "$ENV/etc/frpc.toml")" "serverAddr"
+}
+
+# ============================================================
 # 13. dry run
 # ============================================================
 t_dry_run() {
@@ -1231,7 +1286,7 @@ t_perf() {
 # ============================================================
 # All sections, in order. SECTIONS="idempotent mtu_ttl" runs a subset.
 ALL_SECTIONS="static unit_templates helpers install_iran install_foreign idempotent \
-mtu_ttl ports safety frp firewall test_command doctor dry_run services uninstall \
+mtu_ttl ports safety frp firewall test_command doctor relay_dnat dry_run services uninstall \
 set tui update perf"
 
 main() {

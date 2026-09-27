@@ -202,6 +202,8 @@ sudo gft status                 # وضعیت لینک، MTU/TTL، پورت‌ه�
 sudo gft test                   # تست تانل، تکه‌تکه شدن، پورت کنترل، پورت‌ها
 sudo gft doctor                 # تشخیص عمیق: IP غلط، GRE فیلترشده، خطای frp
 sudo gft encap fou              # سوییچ به GRE-over-UDP روی هر دو سرور (وقتی GRE خام فیلتر است)
+sudo gft relay dnat             # حالت فوروارد هسته‌ای: خارج هیچ frp/پورتی نمی‌شناسد (هر دو سرور)
+sudo gft relay frp              # برگشت به حالت frp
 sudo gft optimize               # محاسبهٔ فوری بهترین MTU و TTL
 sudo gft edit                   # ویرایشگر تعاملی همهٔ تنظیمات تانل
 sudo gft set <key> <value>      # تغییر یک تنظیم بدون سؤال

@@ -64,7 +64,11 @@ units_enable() {
         gft-tunnel-optimize.timer \
         gft-tunnel-frpupdate.timer || true
   local role; role="$(cfg_get ROLE)"
-  if [ "$role" = "iran" ]; then
+  if [ "$(relay_mode)" = "dnat" ]; then
+    # kernel-DNAT relay: no frp service on either side
+    mutq systemctl disable --now frps.service 2>/dev/null || true
+    mutq systemctl disable --now frpc.service 2>/dev/null || true
+  elif [ "$role" = "iran" ]; then
     mutq systemctl enable frps.service || true
     mutq systemctl disable --now frpc.service 2>/dev/null || true
   else

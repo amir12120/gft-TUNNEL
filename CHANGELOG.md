@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`gft relay dnat|frp|show`** — a second relay mode next to frp: **kernel
+  DNAT forwarding over the GRE link**. In `dnat` mode the foreign server runs
+  NO frp and learns nothing about the config ports: the Iranian relay rewrites
+  user traffic (`DNAT → 10.99.99.2:<port>`) into the tunnel and SNATs the
+  replies back; the foreign side only forwards (plus a local DNAT to the
+  panel address, loopback targets supported via `route_localnet`). Faster
+  (no userspace hop) and the port list only ever lives on the Iranian side.
+  The panel's SYN-ACKs are MSS-clamped in the `--sports` direction so
+  upstream does not blackhole on the GRE MTU. `gft status` and `gft relay
+  show` report the active mode; the mode, the NAT rules and the frp services
+  are switched cleanly in both directions (both servers, `relay dnat` on
+  Iran + foreign).
+- The smoke suite is now ~350 assertions across 20 sections.
+
 ## [1.1.2] — 2026-09-27
 
 Field-fix release, driven by a real deployment whose foreign frpc kept dying

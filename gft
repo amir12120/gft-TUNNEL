@@ -67,6 +67,8 @@ GFT_VERSION_FILE="${GFT_VERSION_FILE:-$GFT_SELF_DIR/VERSION}"
 . "$GFT_LIB_DIR/frp.sh"
 # shellcheck source=lib/firewall.sh
 . "$GFT_LIB_DIR/firewall.sh"
+# shellcheck source=lib/relay.sh
+. "$GFT_LIB_DIR/relay.sh"
 # shellcheck source=lib/units.sh
 . "$GFT_LIB_DIR/units.sh"
 
@@ -403,6 +405,7 @@ cmd_status() {
   printf '  autotune ttl     : %s (loss %s%%, hops %s, updated %s)\n' \
     "$(cfg_get TUNNEL_TTL_UPDATED never)" "$(cfg_get TUNNEL_TTL_LOSS '-')" "$(cfg_get TUNNEL_TTL_HOPS '?')"
   printf '  ports (TCP+UDP)  : %s  (%s ports)\n' "${ports:-none}" "$(ports_count "$ports")"
+  printf '  relay mode       : %s — %s\n' "$(relay_mode)" "$(relay_describe)"
   printf '  frp version      : %s\n' "$(frp_installed_version || echo 'not installed')"
   printf '  udp packet size  : %s bytes\n' "$(frp_udp_packet_size)"
   printf '  auth token       : %s\n' "$(cfg_get AUTH_TOKEN | cut -c1-6)…"
@@ -533,6 +536,44 @@ cmd_doctor() {
   fi
   err "$fails problem(s) found — see the fixes above"
   return 1
+}
+
+cmd_relay() {
+  local mode="${1:-show}"
+  require_root "relay"
+  cfg_is_set ROLE || { err "not configured — run: sudo $GFT_CLI_NAME install"; return 1; }
+  case "$mode" in
+    show)
+      printf 'relay mode: %s (%s)\n' "$(relay_mode)" "$(relay_describe)"
+      ;;
+    dnat|kernel)
+      relay_require_ports
+      step "Switching the relay mode to kernel DNAT"
+      info "run this on BOTH servers — the foreign side then runs NO frp and"
+      info "learns nothing about the config ports; Iran DNATs user traffic into"
+      info "the tunnel and SNATs the replies back"
+      cfg_set RELAY_MODE dnat
+      cfg_set UDP_PACKET_SIZE ""    # force a fresh packet-size lock-in
+      frp_config_write 2>/dev/null || true   # keeps token/state consistent; unused in dnat
+      fw_apply || die "the NAT rules could not be applied"
+      units_enable || true
+      relay_services_restart
+      ok "relay mode: dnat — $(relay_describe)"
+      dim "  verify with: sudo $GFT_CLI_NAME doctor"
+      ;;
+    frp)
+      step "Switching the relay mode to frp"
+      cfg_set RELAY_MODE frp
+      fw_apply || die "the firewall rules could not be applied"
+      frp_config_write || true
+      units_enable || true
+      relay_services_restart
+      ok "relay mode: frp — $(relay_describe)"
+      ;;
+    *)
+      die "usage: $GFT_CLI_NAME relay {show|dnat|frp}"
+      ;;
+  esac
 }
 
 cmd_encap() {
@@ -1160,6 +1201,7 @@ ${GFT_APP_NAME} v$VERSION
   sudo $GFT_CLI_NAME test             connectivity checks
   sudo $GFT_CLI_NAME doctor           deep diagnostics (wrong IP, filtered GRE, frp errors)
   sudo $GFT_CLI_NAME encap fou        switch the tunnel to GRE-over-UDP (both servers!)
+  sudo $GFT_CLI_NAME relay dnat|frp   kernel-DNAT relay (no frp/ports on foreign) or frp relay
   sudo $GFT_CLI_NAME optimize         recalculate the best MTU + TTL now
   sudo $GFT_CLI_NAME ports add 8443   add tunnelled ports (TCP + UDP)
   sudo $GFT_CLI_NAME ports remove 8443
@@ -1298,6 +1340,7 @@ main() {
     test)         cmd_test "$@" ;;
     doctor)       cmd_doctor "$@" ;;
     encap)        cmd_encap "$@" ;;
+    relay)        cmd_relay "$@" ;;
     optimize|mtu) cmd_optimize "$@" ;;
     ports)        cmd_ports "$@" ;;
     frp)          cmd_frp "$@" ;;
