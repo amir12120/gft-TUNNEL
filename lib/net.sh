@@ -220,32 +220,103 @@ gft_gre_add_addr() {
 }
 
 gft_gre_create() {
-  local local_pub peer_pub ttl mtu ip_local prefix
+  local local_pub peer_pub ttl mtu ip_local prefix encap
   local_pub="$(cfg_get LOCAL_PUBLIC_IP)"
   peer_pub="$(cfg_get PEER_PUBLIC_IP)"
   ip_local="$(cfg_get GRE_IP_LOCAL "$GFT_DEFAULT_GRE_IP_IRAN")"
   prefix="$(cfg_get GRE_PREFIX 30)"
   ttl="$(cfg_get TUNNEL_TTL "$GFT_DEFAULT_TTL")"
   mtu="$(cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU")"
+  encap="$(cfg_get GRE_ENCAP none)"
   is_uint "$ttl" || ttl="$GFT_DEFAULT_TTL"
   is_uint "$mtu" || mtu="$GFT_DEFAULT_MTU"
 
   gft_gre_dev_exists && return 0
 
+  # GRE-over-UDP (FOU): many Iran ⇄ foreign routes silently drop raw IP
+  # protocol 47 — the outer path pings fine but nothing crosses in-tunnel
+  # (exactly the "frpc dials 10.99.99.1:40001 i/o timeout" symptom).
+  # Wrapping the GRE packets in UDP (port GFT_FOU_PORT) gets them through.
+  local -a encap_args=()
+  if [ "$encap" = "fou" ]; then
+    if mutq modprobe fou 2>/dev/null || quiet modprobe fou; then :; fi
+    mutq ip fou add port "$GFT_FOU_PORT" ipproto gre 2>/dev/null || true
+    encap_args+=(encap fou encap-sport auto encap-dport "$GFT_FOU_PORT")
+  fi
+
   if net_ip_is_local "$local_pub"; then
+    # shellcheck disable=SC2086
     mutq ip link add name "$GFT_TUN_DEV" type gre \
-      local "$local_pub" remote "$peer_pub" ttl "$ttl" \
+      local "$local_pub" remote "$peer_pub" ttl "$ttl" "${encap_args[@]}" \
       || { err "could not create GRE device (is ip_gre available?)"; return 1; }
   else
     warn "public IP $local_pub is not on this machine — creating GRE without 'local' (NAT mode)"
+    # shellcheck disable=SC2086
     mutq ip link add name "$GFT_TUN_DEV" type gre \
-      remote "$peer_pub" ttl "$ttl" \
+      remote "$peer_pub" ttl "$ttl" "${encap_args[@]}" \
       || { err "could not create GRE device"; return 1; }
   fi
 
   gft_gre_add_addr "$ip_local" "$prefix" || true
   mutq ip link set dev "$GFT_TUN_DEV" mtu "$mtu" || true
   mutq ip link set dev "$GFT_TUN_DEV" up || true
+  return 0
+}
+
+# True when the OUTER path answers (peer public IP) but the in-tunnel
+# path is dead — the signature of a GRE-filtered route (or of the peer
+# having built its side with a different public IP).
+gft_inner_dead_outer_ok() {
+  local peer_pub peer_gre out replies out2 replies2
+  peer_pub="$(cfg_get PEER_PUBLIC_IP)"
+  peer_gre="$(cfg_get GRE_IP_REMOTE)"
+  is_ipv4 "$peer_pub" && is_ipv4 "$peer_gre" || return 1
+  out="$(net_ping_host "$peer_pub" 3 2)"
+  replies="${out%% *}"
+  [ "${replies:-0}" -ge 1 ] || return 1
+  out2="$(net_ping_host "$peer_gre" 3 2)"
+  replies2="${out2%% *}"
+  [ "${replies2:-0}" -eq 0 ]
+}
+
+# Switch the device between raw GRE and GRE-over-UDP (FOU). Used by the
+# watchdog and by `gft doctor` when the raw-GRE path is filtered.
+gft_gre_set_encap() {
+  local mode="$1"
+  case "$mode" in
+    fou) cfg_set GRE_ENCAP fou ;;
+    *)   cfg_set GRE_ENCAP none ;;
+  esac
+  # rebuild with the new encapsulation (create() is a no-op while the
+  # device exists, so destroy first)
+  gft_gre_destroy || true
+  gft_gre_ensure_up
+}
+
+# Restore a public-IP override written by pre-1.1.1 installers when the
+# echo services had reported a VPN/proxy egress address instead of this
+# server's own interface address.
+gft_fix_stale_public_ip() {
+  local stored real role peer_of_peer
+  stored="$(cfg_get LOCAL_PUBLIC_IP)"
+  is_ipv4 "$stored" || return 1
+  net_ip_is_local "$stored" && return 0        # stored value is fine
+  real="$(net_public_ip_detect 2>/dev/null || true)"
+  is_ipv4 "$real" || return 1
+  [ "$real" != "$stored" ] || return 0
+  role="$(cfg_get ROLE)"
+  peer_of_peer="$(cfg_get PEER_PUBLIC_IP)"
+  warn "stored public IP $stored is not on any interface here; the interface address is $real"
+  if [ "$role" = "foreign" ]; then
+    # only the GRE endpoints reference our own IP — repoint them safely
+    cfg_set LOCAL_PUBLIC_IP "$real"
+    info "updated LOCAL_PUBLIC_IP to $real (run 'sudo $GFT_CLI_NAME restart' or re-run the install)"
+  else
+    warn "the Iran side stores its own IP — fix it on BOTH servers:"
+    dim "  sudo $GFT_CLI_NAME set local-ip $real        # on this (Iran) server"
+    dim "  sudo $GFT_CLI_NAME set peer-ip $real         # on the foreign server"
+    dim "  (then: sudo $GFT_CLI_NAME restart on both)"
+  fi
   return 0
 }
 
@@ -440,7 +511,12 @@ net_optimize_all() {
   net_optimize_ttl
 }
 
-# Hourly watchdog: makes sure the device is still there and the peer answers
+# Hourly watchdog: makes sure the device is still there and the peer answers.
+# When the outer path is alive but the in-tunnel path stays dead after a
+# rebuild AND GRE was never blocked before (raw mode), one automatic switch
+# to GRE-over-UDP (FOU) is attempted — the signature fix for filtered
+# protocol-47 routes. The switch is remembered in the state file, so it
+# never flaps back and forth.
 net_watchdog() {
   local peer_gre out replies
   if ! gft_gre_dev_exists; then
@@ -456,7 +532,21 @@ net_watchdog() {
     gft_gre_ensure_up || return 1
     out="$(net_ping_host "$peer_gre" 3 2)"
     replies="${out%% *}"
-    [ "${replies:-0}" -ge 1 ] && ok "tunnel recovered" || warn "tunnel is still down"
+    if [ "${replies:-0}" -ge 1 ]; then
+      ok "tunnel recovered"
+    elif [ "$(cfg_get GRE_ENCAP none)" = "none" ] && [ "$(cfg_get FOU_AUTOSWITCHED 0)" != "1" ] \
+      && gft_inner_dead_outer_ok; then
+      warn "outer path is fine but the tunnel stays dead — protocol 47 looks filtered"
+      info "switching to GRE-over-UDP (FOU, port $GFT_FOU_PORT) once — run this on BOTH servers"
+      cfg_set FOU_AUTOSWITCHED 1
+      gft_gre_set_encap fou || warn "the FOU switch did not bring the tunnel up (kernel/user mismatch?)"
+      out="$(net_ping_host "$peer_gre" 3 2)"
+      replies="${out%% *}"
+      [ "${replies:-0}" -ge 1 ] && ok "tunnel recovered over UDP encapsulation" \
+        || warn "tunnel is still down — run 'sudo gft doctor' on both servers"
+    else
+      warn "tunnel is still down — run 'sudo gft doctor' on both servers"
+    fi
   fi
   return 0
 }

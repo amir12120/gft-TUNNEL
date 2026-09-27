@@ -11,6 +11,9 @@
 #   STUB_MIN_TTL      minimum outer TTL that survives        (default HOPS+1)
 #   STUB_LOSS_AT_TTL  "64:50;128:0" — loss % for a given TTL
 #   STUB_LOSS_AT_MTU  "1472:50"      — loss % for a given tunnel MTU
+#   STUB_GRE_DEAD=1   the in-tunnel path never answers (GRE blocked);
+#                     the OUTER path still answers, like a real filtered
+#                     GRE route between Iran and a foreign DC
 # ============================================================
 S="${STUB_TMP:?STUB_TMP is not set}"
 mkdir -p "$S"
@@ -62,6 +65,9 @@ ok=1
 kind=""
 if [ "$dst" = "$GRE_REMOTE" ]; then
   kind="tunnel"
+  # STUB_GRE_DEAD simulates GRE being filtered: the outer path works
+  # (that branch still answers) but nothing ever comes back in-tunnel
+  [ "${STUB_GRE_DEAD:-0}" = "1" ] && ok=0
   ttl="$(dev_ttl)"
   if [ "$ttl" -lt "$MIN_TTL" ]; then ok=0; fi
   if [ -n "$size" ] && is_uint "$size"; then

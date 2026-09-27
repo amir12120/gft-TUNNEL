@@ -200,6 +200,8 @@ sudo gft frp update        # نصب آخرین نسخهٔ frp
 sudo gft                        # منوی تعاملی
 sudo gft status                 # وضعیت لینک، MTU/TTL، پورت‌ها، سرویس‌ها
 sudo gft test                   # تست تانل، تکه‌تکه شدن، پورت کنترل، پورت‌ها
+sudo gft doctor                 # تشخیص عمیق: IP غلط، GRE فیلترشده، خطای frp
+sudo gft encap fou              # سوییچ به GRE-over-UDP روی هر دو سرور (وقتی GRE خام فیلتر است)
 sudo gft optimize               # محاسبهٔ فوری بهترین MTU و TTL
 sudo gft edit                   # ویرایشگر تعاملی همهٔ تنظیمات تانل
 sudo gft set <key> <value>      # تغییر یک تنظیم بدون سؤال

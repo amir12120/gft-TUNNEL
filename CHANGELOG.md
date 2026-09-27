@@ -4,6 +4,38 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] — 2026-09-27
+
+Field-fix release, driven by a real deployment whose foreign frpc kept dying
+with `dial tcp 10.99.99.1:40001: i/o timeout` while the internet path between
+the two servers was fine.
+
+### Added
+- **`gft doctor`** — deep diagnostics that pinpoint the exact blocker: a
+  stored public IP that is not on any interface (with copy-paste fix commands
+  for both servers), outer path vs in-tunnel reachability, the GRE device, the
+  frp service with its last journal errors, and the frps control port that
+  frpc needs.
+- **`gft encap fou|none`** — run the tunnel as **GRE over UDP (FOU**, UDP port
+  `5555` by default, `GFT_FOU_PORT` to change, must match on both servers**)**.
+  Many Iran ⇄ foreign routes silently drop raw IP protocol 47: the outer path
+  pings fine but nothing crosses in-tunnel — exactly the timeout signature
+  above. FOU wraps the GRE packets in UDP so they pass such filters.
+- **Automatic one-shot FOU switch**: when the watchdog finds the outer path
+  alive, the tunnel dead, and raw GRE in use, it rebuilds the link with FOU
+  once and remembers it (`FOU_AUTOSWITCHED`) so it never flaps.
+
+### Fixed
+- **frpc no longer crash-loops systemd.** `loginFailExit = false` keeps the
+  client retrying in-process when the relay is unreachable (GRE down, peer
+  reinstalling) instead of exiting and triggering restart-after-restart.
+
+### Tests
+- New `doctor` section simulating a filtered-GRE route (`STUB_GRE_DEAD`):
+  doctor must name the dead in-tunnel path, prescribe the FOU switch, the
+  watchdog must perform the one-shot switch, and the tunnel must pass again
+  after it. `frpc.toml` must carry `loginFailExit = false`.
+
 ## [1.1.1] — 2026-09-27
 
 Hardening release: correct public-IP detection on Iranian servers, boot-order

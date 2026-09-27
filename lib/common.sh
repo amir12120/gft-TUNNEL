@@ -49,6 +49,9 @@ GFT_DEFAULT_GRE_IP_FOREIGN="10.99.99.2"
 GFT_DEFAULT_CTRL_PORT="40001"
 GFT_DEFAULT_MTU="1472"
 GFT_DEFAULT_TTL="64"
+# UDP port used when the tunnel runs as GRE-over-UDP (FOU). Both sides
+# must use the same number; both derive it from the same constant.
+GFT_FOU_PORT="${GFT_FOU_PORT:-5555}"
 
 # ------------------------------------------------------------
 # Colours / logging

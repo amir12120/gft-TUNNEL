@@ -429,6 +429,137 @@ cmd_optimize() {
 }
 
 # ------------------------------------------------------------
+# Doctor — deep diagnostics for a tunnel that is not passing traffic
+# ------------------------------------------------------------
+cmd_doctor() {
+  local fails=0 role stored peer_pub peer_gre dev
+  role="$(cfg_get ROLE)"
+  [ -n "$role" ] || { err "not configured — run: sudo $GFT_CLI_NAME install"; return 1; }
+  peer_pub="$(cfg_get PEER_PUBLIC_IP)"
+  peer_gre="$(cfg_get GRE_IP_REMOTE)"
+  dev="$(cfg_get TUN_DEV "$GFT_TUN_DEV")"
+
+  hr; step "Doctor — deep tunnel diagnostics"; hr
+
+  # 1. stored public IP vs the address this machine really uses
+  local stored; stored="$(cfg_get LOCAL_PUBLIC_IP)"
+  if net_ip_is_local "$stored"; then
+    ok "stored public IP $stored is on this machine"
+  else
+    local real; real="$(net_public_ip_detect 2>/dev/null || true)"
+    err "stored public IP $stored is NOT on any interface here (interface address: ${real:-unknown})"
+    fails=$(( fails + 1 ))
+    if [ "$role" = "iran" ]; then
+      dim "  this is the classic wrong-Iran-IP install; fix on BOTH servers:"
+      dim "    sudo $GFT_CLI_NAME set local-ip ${real:-<iran-ip>}     # on THIS server"
+      dim "    sudo $GFT_CLI_NAME set peer-ip ${real:-<iran-ip>}      # on the FOREIGN server"
+      dim "    sudo $GFT_CLI_NAME restart                              # on both"
+    else
+      dim "  fix: sudo $GFT_CLI_NAME set local-ip ${real:-<this-ip>} && sudo $GFT_CLI_NAME restart"
+    fi
+  fi
+
+  # 2. peer reachability on the OUTER path (internet, not tunnel)
+  local out replies
+  out="$(net_ping_host "$peer_pub" 3 2)"; replies="${out%% *}"
+  if [ "${replies:-0}" -ge 1 ]; then
+    ok "peer $peer_pub answers on the public internet path"
+  else
+    warn "peer $peer_pub does not answer pings (ICMP may be filtered — not fatal)"
+  fi
+
+  # 3. GRE device
+  if gft_gre_dev_exists; then
+    ok "GRE device $dev exists ($(gft_gre_show | head -1 | sed 's/^ *//'))"
+  else
+    err "GRE device $dev is missing — try: sudo $GFT_CLI_NAME restart"
+    fails=$(( fails + 1 ))
+  fi
+
+  # 4. in-tunnel reachability — the decisive test
+  out="$(net_ping_host "$peer_gre" 4 2)"; replies="${out%% *}"
+  if [ "${replies:-0}" -ge 1 ]; then
+    ok "peer $peer_gre answers INSIDE the tunnel"
+  else
+    err "peer $peer_gre does NOT answer inside the tunnel"
+    fails=$(( fails + 1 ))
+    if gft_inner_dead_outer_ok; then
+      warn "the outer path works but nothing crosses the tunnel"
+      case "$(cfg_get GRE_ENCAP none)" in
+        fou)
+          dim "  FOU is already active — check that BOTH servers use it and the"
+          dim "  same UDP port ($GFT_FOU_PORT), and that each side stored the"
+          dim "  OTHER side's correct public IP"
+          ;;
+        *)
+          dim "  this signature (outer ok, tunnel dead) usually means GRE"
+          dim "  (IP protocol 47) is filtered on the Iran route. Switch both"
+          dim "  servers to GRE-over-UDP:"
+          dim "    sudo $GFT_CLI_NAME encap fou          # on BOTH servers"
+          dim "    sudo $GFT_CLI_NAME restart"
+          ;;
+      esac
+    fi
+  fi
+
+  # 5. frp service and its actual error
+  if is_systemd; then
+    local unit
+    if [ "$role" = "iran" ]; then unit=frps.service; else unit=frpc.service; fi
+    if service_active "$unit"; then
+      ok "$unit is running"
+    else
+      err "$unit is not running — last errors:"
+      journalctl -u "$unit" -n 5 --no-pager 2>/dev/null | sed 's/^/      /' || true
+      fails=$(( fails + 1 ))
+    fi
+  fi
+
+  # 6. control port across the tunnel (the exact thing frpc needs)
+  if [ "$role" = "foreign" ]; then
+    local ctrl; ctrl="$(cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT")"
+    if net_tcp_check "$peer_gre" "$ctrl" 3; then
+      ok "frps control port $ctrl reachable on the Iran side"
+    else
+      err "frps control port $ctrl is NOT reachable on $peer_gre — frpc cannot log in until this works"
+      fails=$(( fails + 1 ))
+    fi
+  fi
+
+  hr
+  if [ "$fails" -eq 0 ]; then
+    ok "doctor found no blocking problem"
+    return 0
+  fi
+  err "$fails problem(s) found — see the fixes above"
+  return 1
+}
+
+cmd_encap() {
+  local mode="${1:-show}"
+  require_root "encap"
+  cfg_is_set ROLE || { err "not configured — run: sudo $GFT_CLI_NAME install"; return 1; }
+  case "$mode" in
+    show)
+      printf 'encapsulation: %s\n' "$(cfg_get GRE_ENCAP none)"
+      dim "  none = raw GRE (IP protocol 47); fou = GRE wrapped in UDP port $GFT_FOU_PORT"
+      ;;
+    fou|udp)
+      step "Switching to GRE-over-UDP (FOU, port $GFT_FOU_PORT)"
+      info "run this on BOTH servers, then: sudo $GFT_CLI_NAME restart"
+      gft_gre_set_encap fou || die "could not rebuild the device with FOU (kernel module 'fou' missing?)"
+      ok "tunnel rebuilt with UDP encapsulation"
+      ;;
+    none|gre)
+      step "Switching back to raw GRE (IP protocol 47)"
+      gft_gre_set_encap none || die "could not rebuild the device"
+      ok "tunnel rebuilt with raw GRE"
+      ;;
+    *) die "usage: $GFT_CLI_NAME encap {show|fou|none}" ;;
+  esac
+}
+
+# ------------------------------------------------------------
 # Test
 # ------------------------------------------------------------
 cmd_test() {
@@ -1027,6 +1158,8 @@ ${GFT_APP_NAME} v$VERSION
   sudo $GFT_CLI_NAME set <k> <v>      change one setting non-interactively
   sudo $GFT_CLI_NAME status           show the tunnel state
   sudo $GFT_CLI_NAME test             connectivity checks
+  sudo $GFT_CLI_NAME doctor           deep diagnostics (wrong IP, filtered GRE, frp errors)
+  sudo $GFT_CLI_NAME encap fou        switch the tunnel to GRE-over-UDP (both servers!)
   sudo $GFT_CLI_NAME optimize         recalculate the best MTU + TTL now
   sudo $GFT_CLI_NAME ports add 8443   add tunnelled ports (TCP + UDP)
   sudo $GFT_CLI_NAME ports remove 8443
@@ -1163,6 +1296,8 @@ main() {
     tunnel-port)  cmd_set tunnel-port "$@" ;;
     status)       cmd_status "$@" ;;
     test)         cmd_test "$@" ;;
+    doctor)       cmd_doctor "$@" ;;
+    encap)        cmd_encap "$@" ;;
     optimize|mtu) cmd_optimize "$@" ;;
     ports)        cmd_ports "$@" ;;
     frp)          cmd_frp "$@" ;;

@@ -394,6 +394,10 @@ frp_config_write_client() {
     echo "transport.dialServerKeepalive = 7200"
     echo "transport.heartbeatInterval = 10"
     echo "transport.heartbeatTimeout = 30"
+    # keep retrying in-process when the relay is unreachable (GRE down,
+    # peer reinstalling, …) instead of dying and hammering systemd with
+    # restart-after-restart
+    echo "loginFailExit = false"
     echo ""
     echo "# Keeps UDP datagrams inside the GRE MTU so they never fragment."
     echo "# MUST be identical to the Iran side's frps.toml — do not change"

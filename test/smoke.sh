@@ -807,6 +807,52 @@ t_test_command() {
 }
 
 # ============================================================
+# 12b. doctor + GRE-over-UDP (the "frpc dials i/o timeout" scenario)
+# ============================================================
+t_doctor() {
+  section "12b. Doctor and GRE filtering (FOU)"
+  setup_env doctor_dead
+  seed_state iran 1476 64
+  STUB_GRE_DEAD=1
+  export STUB_GRE_DEAD
+
+  # the classic signature: outer path fine, in-tunnel dead
+  run_cli doctor
+  assert_ne "doctor reports failures on a dead tunnel" "$RC" "0"
+  assert_contains "doctor names the missing tunnel path" "$(cat "$ENV/out.txt")" "does NOT answer inside the tunnel"
+  assert_contains "doctor explains the filtered-GRE signature" "$(cat "$ENV/out.txt")" "outer path works but nothing crosses"
+  assert_contains "doctor prescribes the FOU switch" "$(cat "$ENV/out.txt")" "encap fou"
+
+  # the watchdog's one-shot automatic FOU switch
+  out="$(lib_run 'net_watchdog >/dev/null 2>&1; echo "encap=$(cfg_get GRE_ENCAP) flagged=$(cfg_get FOU_AUTOSWITCHED)"')"
+  assert_contains "watchdog auto-switched to FOU once" "$out" "encap=fou flagged=1"
+
+  # after the switch the (simulated) filtered path passes again
+  unset STUB_GRE_DEAD
+  out="$(lib_run 'gft_gre_ensure_up >/dev/null 2>&1; net_ping_host "$(cfg_get GRE_IP_REMOTE)" 2 2' )"
+  assert_contains "in-tunnel path answers again after FOU" "$out" "2"
+
+  # the explicit command path
+  run_cli encap show
+  assert_contains "encap show reports the current mode" "$(cat "$ENV/out.txt")" "encapsulation: fou"
+
+  # frpc config keeps retrying instead of crash-looping systemd
+  setup_env doctor_frpc
+  seed_state foreign 1476 64
+  run_cli restart
+  assert_contains "frpc keeps retrying failed logins" "$(cat "$ENV/etc/frpc.toml")" "loginFailExit = false"
+
+  # doctor on a healthy tunnel is quiet (device + services up first)
+  setup_env doctor_ok
+  seed_state iran 1476 64
+  lib_run 'frp_install_latest' >/dev/null 2>&1
+  run_cli restart
+  run_cli doctor
+  assert_rc "doctor passes on a healthy tunnel" "$RC" "0"
+  assert_contains "doctor verified the in-tunnel path" "$(cat "$ENV/out.txt")" "answers INSIDE the tunnel"
+}
+
+# ============================================================
 # 13. dry run
 # ============================================================
 t_dry_run() {
@@ -1185,7 +1231,7 @@ t_perf() {
 # ============================================================
 # All sections, in order. SECTIONS="idempotent mtu_ttl" runs a subset.
 ALL_SECTIONS="static unit_templates helpers install_iran install_foreign idempotent \
-mtu_ttl ports safety frp firewall test_command dry_run services uninstall \
+mtu_ttl ports safety frp firewall test_command doctor dry_run services uninstall \
 set tui update perf"
 
 main() {

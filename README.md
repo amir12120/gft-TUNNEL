@@ -202,6 +202,8 @@ Every run appends a line to `/var/log/gft-tunnel/optimize.log`, and
 sudo gft                        # interactive menu
 sudo gft status                 # link, MTU/TTL, ports, services, frp version
 sudo gft test                   # tunnel, fragmentation, control port, ports
+sudo gft doctor                 # deep diagnostics: wrong IP, filtered GRE, frp errors
+sudo gft encap fou              # switch to GRE-over-UDP on BOTH servers (raw GRE filtered)
 sudo gft optimize               # recalculate MTU + TTL right now
 sudo gft edit                   # interactive editor for every tunnel setting
 sudo gft set <key> <value>      # change one setting non-interactively
