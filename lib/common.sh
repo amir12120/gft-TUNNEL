@@ -47,7 +47,7 @@ GFT_DEFAULT_NET="10.99.99"
 GFT_DEFAULT_GRE_IP_IRAN="10.99.99.1"
 GFT_DEFAULT_GRE_IP_FOREIGN="10.99.99.2"
 GFT_DEFAULT_CTRL_PORT="40001"
-GFT_DEFAULT_MTU="1472"
+GFT_DEFAULT_MTU="1476"   # 1500 (a standard path) minus the 24 byte GRE overhead
 GFT_DEFAULT_TTL="64"
 # UDP port used when the tunnel runs as GRE-over-UDP (FOU). Both sides
 # must use the same number; both derive it from the same constant.

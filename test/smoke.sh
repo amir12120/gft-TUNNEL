@@ -155,8 +155,9 @@ install_iran() {
 
 # A pre-seeded state file lets the fast tests exercise one subsystem
 # (optimizer, firewall, ports, services) without paying for a full install.
-seed_state() { # [role] [mtu] [ttl] [ports]
+seed_state() { # [role] [mtu] [ttl] [ports|none]
   local role="${1:-iran}" mtu="${2:-1476}" ttl="${3:-64}" ports="${4:-443,2053}"
+  [ "$ports" = "none" ] && ports=""
   local lp="203.0.113.10" pp="198.51.100.9" gl="10.99.99.1" gr="10.99.99.2"
   if [ "$role" = "foreign" ]; then
     lp="198.51.100.9"; pp="203.0.113.10"; gl="10.99.99.2"; gr="10.99.99.1"; fi
@@ -850,15 +851,27 @@ t_doctor() {
   run_cli doctor
   assert_rc "doctor passes on a healthy tunnel" "$RC" "0"
   assert_contains "doctor verified the in-tunnel path" "$(cat "$ENV/out.txt")" "answers INSIDE the tunnel"
+
+  # a device left over from an earlier configuration keeps the old peer
+  # and is the classic reason a re-install "changes nothing"
+  setup_env doctor_stale
+  seed_state iran 1476 64
+  run_cli restart
+  sed -i 's/^devremote gft0 .*/devremote gft0 198.51.100.99/' "$ENV/stubtmp/ip.state" 2>/dev/null \
+    || sed -i '' 's/^devremote gft0 .*/devremote gft0 198.51.100.99/' "$ENV/stubtmp/ip.state"
+  run_cli doctor
+  assert_ne "doctor fails on a stale link" "$RC" "0"
+  assert_contains "doctor names the stale link" "$(cat "$ENV/out.txt")" "stale link"
+  assert_contains "doctor prints the fix" "$(cat "$ENV/out.txt")" "set peer-ip 198.51.100.9"
 }
 
 # ============================================================
-# 12c. kernel-DNAT relay mode (no ports on the foreign side at all)
+# 12c. kernel relay mode — a plain port forward over the GRE IP
 # ============================================================
 t_relay_dnat() {
-  section "12c. Kernel DNAT relay mode"
+  section "12c. Kernel relay mode (port forward over the tunnel)"
 
-  # --- Iran side -------------------------------------------------------
+  # --- Iran side, with a port list -------------------------------------
   setup_env relay_iran
   seed_state iran 1476 64 "2083,2096,10285,10286,30004,30005,30006"
   run_cli relay dnat
@@ -866,22 +879,40 @@ t_relay_dnat() {
   assert_contains "mode stored" "$(cat "$ENV/out.txt")" "relay mode: dnat"
 
   local nat; nat="$(cat "$ENV/stubtmp/iptables.nat.state" 2>/dev/null)"
-  assert_contains "Iran DNATs the config port into the tunnel" "$nat" "--dport 2083 -j DNAT --to-destination 10.99.99.2:2083"
-  assert_contains "Iran DNATs UDP too" "$nat" "-p udp --dport 2083 -j DNAT"
-  assert_contains "Iran SNATs replies so they return through the tunnel" "$nat" "-j SNAT --to-source 10.99.99.1"
+  assert_contains "Iran DNATs the configured ports into the tunnel" "$nat" \
+    "-p tcp -m multiport --dports 2083,2096,10285,10286,30004,30005,30006 -j DNAT --to-destination 10.99.99.2"
+  assert_contains "Iran DNATs UDP too" "$nat" "-p udp -m multiport --dports 2083"
+  assert_not_contains "the DNAT keeps the original port (no per-port rewrite)" "$nat" "10.99.99.2:2083"
+  assert_contains "replies are masqueraded back through the tunnel" "$nat" "-o gft0 -j MASQUERADE"
+  assert_not_contains "no per-port SNAT rule is needed any more" "$nat" "-j SNAT"
   assert_contains "Iran accepts forwarded tunnel traffic" "$(iptables_rules)" "-o gft0 -j ACCEPT"
 
   local mangle; mangle="$(cat "$ENV/stubtmp/iptables.mangle.state" 2>/dev/null)"
-  assert_contains "the panel's SYN-ACKs are clamped (sports direction)" "$mangle" "--sports 2083"
+  assert_contains "the panel's SYN-ACKs are clamped, port-independently" "$mangle" "-i gft0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1436"
+  assert_not_contains "the kernel clamp does not need the port list" "$mangle" "--dports"
 
-  # frps must be off in dnat mode
+  # frps must be off in kernel mode
   case "$(cat "$ENV/stubtmp/systemctl.active" 2>/dev/null)" in
-    *frps.service*) bad_msg "frps must NOT run in dnat mode" ;;
-    *) ok_msg "frps must NOT run in dnat mode" ;;
+    *frps.service*) bad_msg "frps must NOT run in kernel mode" ;;
+    *) ok_msg "frps must NOT run in kernel mode" ;;
   esac
 
-  # the public INPUT rules for the config ports stay (users connect to them)
-  assert_contains "config ports still open on the Iranian public IP" "$(iptables_rules)" "-p tcp --dport 2083 -j ACCEPT"
+  # clients are served by the DNAT, so nothing has to be opened in INPUT
+  assert_not_contains "no per-port INPUT rule is needed on the relay" "$(iptables_rules)" "--dport 2083 -j ACCEPT"
+
+  # --- Iran side, with NO port list (forward everything) ----------------
+  setup_env relay_all
+  seed_state iran 1476 64 none
+  run_cli relay dnat
+  assert_rc "relay dnat works without a port list" "$RC" "0"
+  local allnat; allnat="$(cat "$ENV/stubtmp/iptables.nat.state" 2>/dev/null)"
+  assert_contains "every TCP port is forwarded into the tunnel" "$allnat" "-p tcp -m multiport ! --dports"
+  assert_contains "every UDP port is forwarded into the tunnel" "$allnat" "-p udp -m multiport ! --dports"
+  # whatever else they add, the SSH port stays local (lock-out guard)
+  assert_contains "the catch-all keeps SSH local" \
+    "$(grep '^-p tcp -m multiport ! --dports' "$ENV/stubtmp/iptables.nat.state" 2>/dev/null)" "22"
+  assert_contains "the catch-all still masquerades" "$allnat" "-o gft0 -j MASQUERADE"
+  assert_contains "the relay description names the tunnel IP" "$(cat "$ENV/out.txt")" "ALL ports forwarded"
 
   # --- Foreign side ----------------------------------------------------
   setup_env relay_foreign
@@ -890,19 +921,23 @@ t_relay_dnat() {
   assert_rc "relay dnat exits 0 on the foreign side" "$RC" "0"
 
   local fnat; fnat="$(cat "$ENV/stubtmp/iptables.nat.state" 2>/dev/null)"
-  assert_contains "foreign DNATs the tunnel traffic to the local panel" "$fnat" "-i gft0 -p tcp --dport 2083 -j DNAT --to-destination 127.0.0.1:2083"
+  assert_contains "the foreign rule mentions no port at all" "$fnat" "-i gft0 -p tcp -j DNAT --to-destination 127.0.0.1"
+  assert_not_contains "...really no port" "$fnat" "--dport"
+  assert_not_contains "the foreign side needs no MASQUERADE" "$fnat" "MASQUERADE"
 
   local frules; frules="$(iptables_rules)"
   assert_not_contains "foreign still publishes NO public port" "$frules" "--dport"
   case "$(cat "$ENV/stubtmp/systemctl.active" 2>/dev/null)" in
-    *frpc.service*) bad_msg "frpc must NOT run in dnat mode" ;;
-    *) ok_msg "frpc must NOT run in dnat mode" ;;
+    *frpc.service*) bad_msg "frpc must NOT run in kernel mode" ;;
+    *) ok_msg "frpc must NOT run in kernel mode" ;;
   esac
 
   # --- back to frp ------------------------------------------------------
   run_cli relay frp
   assert_rc "switching back to frp exits 0" "$RC" "0"
   assert_contains "frpc enabled again" "$(cat "$ENV/stubtmp/systemctl.enabled")" "frpc.service"
+  assert_not_contains "the kernel rules are gone after the switch" \
+    "$(cat "$ENV/stubtmp/iptables.nat.state" 2>/dev/null)" "MASQUERADE"
   run_cli restart
   assert_contains "frpc.toml written again in frp mode" "$(cat "$ENV/etc/frpc.toml")" "serverAddr"
 }

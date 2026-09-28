@@ -90,28 +90,31 @@ fw_mss_value() {
   printf '%s' "$mss"
 }
 
-# Emits the mangle rules that clamp the MSS for the tunnelled ports
+# Emits the mangle rules that clamp the MSS for the tunnelled ports.
+# In frp mode the clamp is per destination port (the relay terminates
+# the client connection). In kernel relay mode the relay module emits a
+# single port-agnostic clamp instead, so a port list is not required.
 fw_mss_specs() {
   local role; role="$(cfg_get ROLE)"
-  [ "$role" = "iran" ] || return 0
   local ports; ports="$(cfg_get TUNNEL_PORTS)"
-  [ -n "$ports" ] || return 0
-  local mss; mss="$(fw_mss_value)"
-  local chunk="" n=0 p
+  local mss chunk n p
 
-  for p in $(ports_parse "$ports" 2>/dev/null); do
-    if [ -z "$chunk" ]; then chunk="$p"; else chunk="$chunk,$p"; fi
-    n=$(( n + 1 ))
-    if [ "$n" -ge "$GFT_FW_MAX_MPORTS" ]; then
+  if [ "$role" = "iran" ] && [ -n "$ports" ] && ! relay_mode_dnat; then
+    mss="$(fw_mss_value)"
+    chunk=""; n=0
+    for p in $(ports_parse "$ports" 2>/dev/null); do
+      if [ -z "$chunk" ]; then chunk="$p"; else chunk="$chunk,$p"; fi
+      n=$(( n + 1 ))
+      if [ "$n" -ge "$GFT_FW_MAX_MPORTS" ]; then
+        printf 'mangle|PREROUTING|-p tcp --tcp-flags SYN,RST SYN -m multiport --dports %s -j TCPMSS --set-mss %s\n' "$chunk" "$mss"
+        chunk=""; n=0
+      fi
+    done
+    if [ -n "$chunk" ]; then
       printf 'mangle|PREROUTING|-p tcp --tcp-flags SYN,RST SYN -m multiport --dports %s -j TCPMSS --set-mss %s\n' "$chunk" "$mss"
-      chunk=""; n=0
     fi
-  done
-  if [ -n "$chunk" ]; then
-    printf 'mangle|PREROUTING|-p tcp --tcp-flags SYN,RST SYN -m multiport --dports %s -j TCPMSS --set-mss %s\n' "$chunk" "$mss"
   fi
-  # dnat mode: the panel's SYN-ACKs also need clamping (config-port as
-  # SOURCE port on the tunnel interface)
+  # the relay module adds its own (port-agnostic) clamp in kernel mode
   relay_extra_mss_specs
 }
 
@@ -134,13 +137,20 @@ fw_rule_specs() {
   printf 'filter|INPUT|-i %s -j ACCEPT\n' "$dev"
 
   if [ "$role" = "iran" ]; then
-    # 3. frp control port — reachable over the tunnel only
-    printf 'filter|INPUT|-i %s -p tcp --dport %s -j ACCEPT\n' "$dev" "$ctrl"
+    # 3. frp control port — reachable over the tunnel only (no frp at all
+    #    in kernel relay mode)
+    if ! relay_mode_dnat; then
+      printf 'filter|INPUT|-i %s -p tcp --dport %s -j ACCEPT\n' "$dev" "$ctrl"
+    fi
     # 4. the tunnelled ports, reachable by VPN clients on the public IP
-    for p in $(ports_parse "$ports" 2>/dev/null); do
-      printf 'filter|INPUT|-p tcp --dport %s -j ACCEPT\n' "$p"
-      printf 'filter|INPUT|-p udp --dport %s -j ACCEPT\n' "$p"
-    done
+    #    (in kernel relay mode with no port list the DNAT catch-all in
+    #    relay_nat_specs takes care of it, so there is nothing to open here)
+    if ! relay_mode_dnat; then
+      for p in $(ports_parse "$ports" 2>/dev/null); do
+        printf 'filter|INPUT|-p tcp --dport %s -j ACCEPT\n' "$p"
+        printf 'filter|INPUT|-p udp --dport %s -j ACCEPT\n' "$p"
+      done
+    fi
     # 5. and the MSS clamp that keeps relayed TCP inside the tunnel MTU
     fw_mss_specs
     # 6. dnat-mode extras: PREROUTING DNAT to the peer's tunnel address +
@@ -268,8 +278,11 @@ fw_apply() {
 
   # On the relay the tunnelled ports are published on the public IP —
   # surface anything that is already bound to them before it silently
-  # starves the frp proxies.
-  [ "$(cfg_get ROLE)" = "iran" ] && fw_report_port_conflicts
+  # starves the frp proxies. Kernel mode does not need the ports to be
+  # free (DNAT happens before the local routing decision), so skip it.
+  if [ "$(cfg_get ROLE)" = "iran" ] && ! relay_mode_dnat; then
+    fw_report_port_conflicts
+  fi
 
   # stale MSS clamps from an earlier MTU are removed before the new ones
   # are added, otherwise every hourly run would stack another rule
@@ -286,7 +299,7 @@ fw_apply() {
   ok "$n firewall rule(s) in place (ACCEPT only — nothing is blocked)"
   if [ "$(cfg_get ROLE)" = "iran" ]; then
     cfg_set MSS_CLAMPED "$(fw_mss_value)"
-    dim "  MSS clamped to $(fw_mss_value) bytes for the tunnelled TCP ports"
+    dim "  MSS clamped to $(fw_mss_value) bytes inside the tunnel"
   fi
   return 0
 }

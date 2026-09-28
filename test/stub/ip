@@ -19,6 +19,8 @@ dev_exists() { grep -qx "dev $1" "$STATE" 2>/dev/null; }
 dev_mtu()    { grep -m1 "^devmtu $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
 dev_ttl()    { grep -m1 "^devttl $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
 dev_addrs()  { grep "^addr $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
+dev_local()  { grep -m1 "^devlocal $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
+dev_remote() { grep -m1 "^devremote $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
 
 full="$*"
 
@@ -34,6 +36,12 @@ case "$full" in
     ttl="$(awk '{for (i = 1; i <= NF; i++) if ($i == "ttl") print $(i + 1)}' <<<"$full")"
     echo "dev $name" >>"$STATE"
     [ -n "$ttl" ] && echo "devttl $name $ttl" >>"$STATE"
+    # remember the endpoints, so `ip -d link show` can report them like
+    # the real kernel does (the doctor checks them for staleness)
+    r="$(awk '{for (i = 1; i <= NF; i++) if ($i == "remote") print $(i + 1)}' <<<"$full")"
+    l="$(awk '{for (i = 1; i <= NF; i++) if ($i == "local") print $(i + 1)}' <<<"$full")"
+    [ -n "$r" ] && echo "devremote $name $r" >>"$STATE"
+    [ -n "$l" ] && echo "devlocal $name $l" >>"$STATE"
     exit 0
     ;;
 
@@ -41,7 +49,7 @@ case "$full" in
   "link del "*|"link delete "*)
     name="${full##* }"
     if dev_exists "$name"; then
-      grep -v -E "^(dev|devmtu|devttl|addr|up) $name( |$)" "$STATE" >"$STATE.tmp" 2>/dev/null || true
+      grep -v -E "^(dev|devmtu|devttl|devlocal|devremote|addr|up) $name( |$)" "$STATE" >"$STATE.tmp" 2>/dev/null || true
       mv "$STATE.tmp" "$STATE"
       exit 0
     fi
@@ -112,8 +120,9 @@ case "$full" in
     name="${full##*dev }"; name="${name%% *}"
     if dev_exists "$name"; then
       mtu="$(dev_mtu "$name")"; [ -n "$mtu" ] || mtu=1472
+      r="$(dev_remote "$name")"; l="$(dev_local "$name")"; t="$(dev_ttl "$name")"
       echo "9: $name: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu $mtu qdisc noqueue state UNKNOWN mode DEFAULT group default"
-      echo "    gre remote any local any ttl inherit"
+      echo "    gre remote ${r:-any} local ${l:-any} ttl ${t:-inherit}"
       exit 0
     fi
     echo "Device \"$name\" does not exist." >&2

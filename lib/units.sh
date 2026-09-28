@@ -91,6 +91,8 @@ services_restart_role() {
     return 0
   }
   mutq systemctl restart gft-tunnel.service || true
+  # kernel relay mode: the kernel is the relay, frp must stay down
+  if relay_mode_dnat; then return 0; fi
   local role; role="$(cfg_get ROLE)"
   if [ "$role" = "iran" ]; then
     mutq systemctl restart frps.service
@@ -118,6 +120,12 @@ services_start_verified() {
   role="$(cfg_get ROLE)"
   if [ "$role" = "iran" ]; then unit="frps.service"; else unit="frpc.service"; fi
   is_systemd || return 0
+  # kernel relay mode: no frp service participates in the data path
+  if relay_mode_dnat; then
+    relay_services_restart
+    ok "kernel relay active — no frp service needed on this server"
+    return 0
+  fi
 
   services_restart_role || true
   sleep 2 2>/dev/null || true
@@ -140,8 +148,14 @@ services_start_verified() {
 
 services_status() {
   is_systemd || { warn "systemd not available"; return 0; }
-  local u state
-  for u in gft-tunnel.service gft-tunnel-optimize.timer gft-tunnel-frpupdate.timer frps.service frpc.service; do
+  local u state units
+  # in kernel relay mode frp is not part of the tunnel at all
+  if relay_mode_dnat; then
+    units="gft-tunnel.service gft-tunnel-optimize.timer gft-tunnel-frpupdate.timer"
+  else
+    units="gft-tunnel.service gft-tunnel-optimize.timer gft-tunnel-frpupdate.timer frps.service frpc.service"
+  fi
+  for u in $units; do
     state="$(systemctl is-active "$u" 2>/dev/null || true)"
     case "$state" in
       active) printf '  %-38s %sactive%s\n' "$u" "$C_G" "$C_0" ;;

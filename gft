@@ -106,6 +106,7 @@ parse_opts() {
       --peer=*)            GFT_PEER_PUBLIC="${a#*=}" ;;
       --local-ip=*)        GFT_LOCAL_PUBLIC="${a#*=}" ;;
       --ports=*)           GFT_PORTS="${a#*=}" ;;
+      --relay=*)           GFT_RELAY_MODE="${a#*=}" ;;
       -h|--help)           PARSE_REST+=(help) ;;
       *)                   PARSE_REST+=("$a") ;;
     esac
@@ -125,7 +126,7 @@ quiet_output_guard() {
 # ------------------------------------------------------------
 setup_collect() {
   local detected="" role="${GFT_ROLE:-}" local_ip peer_ip gft_gre_local gft_gre_remote
-  local ctrl ports target_ip idx
+  local ctrl ports target_ip idx relay_choice
 
   if [ -z "$role" ]; then
     if ! gft_interactive; then
@@ -227,28 +228,53 @@ setup_collect() {
   step "Ports to tunnel (TCP + UDP)"
   ports="${GFT_PORTS:-}"
   if [ -z "$ports" ]; then
-    gft_interactive || die "non-interactive mode needs the port list (GFT_PORTS or --ports=)"
-    dim "  Enter every port at once, separated by commas. Contiguous ranges work too."
-    dim "  Examples:  443        443,8443,2053        2000-2010,443"
-    prompt ports "Ports to publish on the Iranian IP (comma separated)" "443" ports_validate
-  fi
-  ports_validate "$ports" || die "invalid port list: $ports"
-  ports="$(ports_list_csv "$ports")"
-  case ",$ports," in
-    *",$ctrl,"*)
-      warn "the tunnel port $ctrl is also in the tunnelled list — the frp control channel wins"
-      ;;
-  esac
-
-  local clash; clash="$(ports_ssh_conflict "$ports")"
-  if [ -n "$clash" ]; then
-    err "these ports would hijack SSH on the Iranian server: ${clash}"
-    if [ "${GFT_ALLOW_SSH_PORT:-0}" != "1" ]; then
-      die "pick different ports (or set GFT_ALLOW_SSH_PORT=1 to override — it can lock you out)"
+    if gft_interactive; then
+      dim "  The ports live on the IRANIAN side only — the foreign server never learns them."
+      dim "  Leave this EMPTY to forward EVERY port (kernel relay: no frp, nothing to declare on the foreign side)."
+      dim "  Enter every port at once, separated by commas. Contiguous ranges work too."
+      dim "  Examples:  (empty)        443        443,8443,2053"
+      prompt ports "Ports to publish on the Iranian IP (empty = all ports)" "" ports_validate_or_empty
+    else
+      dim "  no port list given — the kernel relay forwards every port"
     fi
-    warn "GFT_ALLOW_SSH_PORT=1 — continuing even though SSH may be shadowed"
+  fi
+  if [ -n "$ports" ]; then
+    ports_validate "$ports" || die "invalid port list: $ports"
+    ports="$(ports_list_csv "$ports")"
+    case ",$ports," in
+      *",$ctrl,"*)
+        warn "the tunnel port $ctrl is also in the tunnelled list — the frp control channel wins"
+        ;;
+    esac
+
+    local clash; clash="$(ports_ssh_conflict "$ports")"
+    if [ -n "$clash" ]; then
+      err "these ports would hijack SSH on the Iranian server: ${clash}"
+      if [ "${GFT_ALLOW_SSH_PORT:-0}" != "1" ]; then
+        die "pick different ports (or set GFT_ALLOW_SSH_PORT=1 to override — it can lock you out)"
+      fi
+      warn "GFT_ALLOW_SSH_PORT=1 — continuing even though SSH may be shadowed"
+    fi
   fi
 
+  # Which data path?
+  #   frp  — a port list is given: the foreign frpc registers those ports
+  #          with the Iranian frps (the classic frp project layout)
+  #   dnat — no port list: the kernel forwards the traffic over the tunnel
+  #          and the foreign side has nothing to declare at all
+  relay_choice="${GFT_RELAY_MODE:-}"
+  case "$relay_choice" in
+    frp|dnat) ;;
+    "") if [ -n "$ports" ]; then relay_choice=frp; else relay_choice=dnat; fi ;;
+    *) die "relay mode must be 'frp' or 'dnat' (got: $relay_choice)" ;;
+  esac
+  if [ "$relay_choice" = "dnat" ] && [ -z "$ports" ]; then
+    info "relay mode: ${C_BOLD}kernel${C_0} — every port forwarded, nothing declared on the foreign side"
+  elif [ "$relay_choice" = "dnat" ]; then
+    info "relay mode: ${C_BOLD}kernel${C_0} — these ports are forwarded from the Iranian IP into the tunnel"
+  fi
+
+  GFT_CFG_RELAY="$relay_choice"
   GFT_CFG_ROLE="$role"
   GFT_CFG_LOCAL="$local_ip"
   GFT_CFG_PEER="$peer_ip"
@@ -264,7 +290,12 @@ setup_collect() {
   printf '  peer server IP    : %s\n' "$peer_ip"
   printf '  tunnel IPs        : %s ⇄ %s\n' "$gft_gre_local" "$gft_gre_remote"
   printf '  control port      : %s/tcp (inside the tunnel)\n' "$ctrl"
-  printf '  tunnelled ports   : %s  (%s ports × TCP+UDP)\n' "$ports" "$(ports_count "$ports")"
+  if [ -n "$ports" ]; then
+    printf '  tunnelled ports   : %s  (%s ports × TCP+UDP)\n' "$ports" "$(ports_count "$ports")"
+  else
+    printf '  tunnelled ports   : %sALL%s — every port except %s\n' "$C_BOLD" "$C_0" "$(relay_keep_local_csv)"
+  fi
+  printf '  relay mode        : %s\n' "$relay_choice"
   [ "$role" = "foreign" ] && printf '  panel on          : %s\n' "$target_ip"
   hr
 
@@ -284,6 +315,7 @@ setup_apply() {
   cfg_set GRE_PREFIX "$(cfg_get GRE_PREFIX 30)"
   cfg_set CTRL_PORT "$GFT_CFG_CTRL"
   cfg_set TUNNEL_PORTS "$GFT_CFG_PORTS"
+  cfg_set RELAY_MODE "$GFT_CFG_RELAY"
   cfg_set LOCAL_TARGET_IP "$GFT_CFG_TARGET"
   cfg_set TUN_DEV "$GFT_TUN_DEV"
   frp_token_resolve >/dev/null
@@ -311,11 +343,17 @@ setup_apply() {
   fw_report_backend
   fw_apply || warn "firewall rules could not be applied"
 
-  step "Installing the latest frp"
-  frp_install_latest || warn "frp installation failed — the tunnel is up, only frp is missing"
+  if [ "$(relay_mode)" = "dnat" ]; then
+    step "frp"
+    dim "  kernel relay mode — nothing to install or configure here:"
+    dim "  the kernel forwards the traffic, so this server needs no frp at all"
+  else
+    step "Installing the latest frp"
+    frp_install_latest || warn "frp installation failed — the tunnel is up, only frp is missing"
 
-  step "Generating frp configuration"
-  frp_config_write
+    step "Generating frp configuration"
+    frp_config_write
+  fi
 
   step "Installing systemd services"
   units_install
@@ -329,12 +367,21 @@ setup_apply() {
   cmd_status || true
   printf '\n'
   ok "done — this server is configured as the ${C_BOLD}${GFT_CFG_ROLE}${C_0} side."
-  if [ "$GFT_CFG_ROLE" = "iran" ]; then
-    info "Now run this script on the FOREIGN server (${GFT_CFG_PEER}) with the same port list:"
+  if [ -z "$GFT_CFG_PORTS" ]; then
+    if [ "$GFT_CFG_ROLE" = "iran" ]; then
+      info "Now run this script on the FOREIGN server (${GFT_CFG_PEER}) with no port list:"
+    else
+      info "Now run this script on the IRANIAN server (${GFT_CFG_PEER}) with no port list:"
+    fi
+    dim "     GFT_ROLE=... ./install.sh      (leave GFT_PORTS empty = every port)"
   else
-    info "Now run this script on the IRANIAN server (${GFT_CFG_PEER}) with the same port list:"
+    if [ "$GFT_CFG_ROLE" = "iran" ]; then
+      info "Now run this script on the FOREIGN server (${GFT_CFG_PEER}) with the same port list:"
+    else
+      info "Now run this script on the IRANIAN server (${GFT_CFG_PEER}) with the same port list:"
+    fi
+    dim "     GFT_PORTS=\"$GFT_CFG_PORTS\" ./install.sh"
   fi
-  dim "     GFT_PORTS=\"$GFT_CFG_PORTS\" ./install.sh"
   if [ "$GFT_CFG_ROLE" = "iran" ]; then
     info "Client (VPN) configs must point at THIS server's IP: ${C_BOLD}${GFT_CFG_LOCAL}${C_0}"
   else
@@ -404,7 +451,12 @@ cmd_status() {
     "$(cfg_get TUNNEL_MTU_UPDATED never)" "$(cfg_get TUNNEL_MTU_LOSS '-')"
   printf '  autotune ttl     : %s (loss %s%%, hops %s, updated %s)\n' \
     "$(cfg_get TUNNEL_TTL_UPDATED never)" "$(cfg_get TUNNEL_TTL_LOSS '-')" "$(cfg_get TUNNEL_TTL_HOPS '?')"
-  printf '  ports (TCP+UDP)  : %s  (%s ports)\n' "${ports:-none}" "$(ports_count "$ports")"
+  if [ -z "$ports" ] && relay_mode_dnat; then
+    printf '  ports (TCP+UDP)  : %sALL%s (every port except %s — kernel relay)\n' \
+      "$C_BOLD" "$C_0" "$(relay_keep_local_csv)"
+  else
+    printf '  ports (TCP+UDP)  : %s  (%s ports)\n' "${ports:-none}" "$(ports_count "$ports")"
+  fi
   printf '  relay mode       : %s — %s\n' "$(relay_mode)" "$(relay_describe)"
   printf '  frp version      : %s\n' "$(frp_installed_version || echo 'not installed')"
   printf '  udp packet size  : %s bytes\n' "$(frp_udp_packet_size)"
@@ -435,14 +487,16 @@ cmd_optimize() {
 # Doctor — deep diagnostics for a tunnel that is not passing traffic
 # ------------------------------------------------------------
 cmd_doctor() {
-  local fails=0 role stored peer_pub peer_gre dev
+  local fails=0 role stored peer_pub peer_gre dev rmode
   role="$(cfg_get ROLE)"
   [ -n "$role" ] || { err "not configured — run: sudo $GFT_CLI_NAME install"; return 1; }
   peer_pub="$(cfg_get PEER_PUBLIC_IP)"
   peer_gre="$(cfg_get GRE_IP_REMOTE)"
   dev="$(cfg_get TUN_DEV "$GFT_TUN_DEV")"
+  rmode="$(relay_mode)"
 
   hr; step "Doctor — deep tunnel diagnostics"; hr
+  dim "  data path: $(relay_describe)"
 
   # 1. stored public IP vs the address this machine really uses
   local stored; stored="$(cfg_get LOCAL_PUBLIC_IP)"
@@ -471,9 +525,20 @@ cmd_doctor() {
     warn "peer $peer_pub does not answer pings (ICMP may be filtered — not fatal)"
   fi
 
-  # 3. GRE device
+  # 3. GRE device — including its endpoints: a device left over from an
+  # earlier configuration keeps the OLD local/remote address (creating is
+  # a no-op while it exists), which looks "up" while nothing crosses it.
   if gft_gre_dev_exists; then
-    ok "GRE device $dev exists ($(gft_gre_show | head -1 | sed 's/^ *//'))"
+    local dshow dtail
+    dshow="$(gft_gre_show)"
+    dtail="$(printf '%s' "$dshow" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
+    ok "GRE device $dev exists ($(printf '%s' "$dshow" | head -1 | sed 's/^ *//'))"
+    dim "  $dtail"
+    if [ -n "$peer_pub" ] && ! printf '%s\n' "$dshow" | grep -q "remote $peer_pub "; then
+      err "the device does not point at the stored peer $peer_pub (stale link)"
+      fails=$(( fails + 1 ))
+      dim "  fix: sudo $GFT_CLI_NAME set peer-ip $peer_pub   (this rebuilds the link)"
+    fi
   else
     err "GRE device $dev is missing — try: sudo $GFT_CLI_NAME restart"
     fails=$(( fails + 1 ))
@@ -505,27 +570,60 @@ cmd_doctor() {
     fi
   fi
 
-  # 5. frp service and its actual error
-  if is_systemd; then
-    local unit
-    if [ "$role" = "iran" ]; then unit=frps.service; else unit=frpc.service; fi
-    if service_active "$unit"; then
-      ok "$unit is running"
+  # 5+6. the data path of the ACTIVE mode. In frp mode that is the frp
+  # service and its control channel; in kernel mode there is no frp at
+  # all, so the NAT rules themselves are checked instead.
+  if [ "$rmode" = "dnat" ]; then
+    local fwd
+    fwd="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo '?')"
+    if [ "$fwd" = "1" ]; then
+      ok "IPv4 forwarding is on (the kernel relay needs it)"
     else
-      err "$unit is not running — last errors:"
-      journalctl -u "$unit" -n 5 --no-pager 2>/dev/null | sed 's/^/      /' || true
+      err "net.ipv4.ip_forward=$fwd — nothing can be forwarded"
       fails=$(( fails + 1 ))
+      dim "  fix: sudo $GFT_CLI_NAME restart"
     fi
-  fi
+    if have iptables; then
+      if [ "$role" = "iran" ]; then
+        if iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- "$GFT_FW_TAG"; then
+          ok "the rules that move client traffic into the tunnel are in place"
+        else
+          err "no DNAT rule found in nat PREROUTING — run: sudo $GFT_CLI_NAME relay dnat"
+          fails=$(( fails + 1 ))
+        fi
+        if iptables -t nat -S POSTROUTING 2>/dev/null | grep -q 'MASQUERADE'; then
+          ok "replies are masqueraded back through the tunnel"
+        else
+          err "no MASQUERADE rule on the tunnel device — replies cannot come back"
+          fails=$(( fails + 1 ))
+        fi
+      else
+        dim "  kernel relay mode: the panel answers on this server's tunnel IP"
+        dim "  ($(cfg_get GRE_IP_LOCAL)) — nothing has to listen on the public IP"
+      fi
+    fi
+  else
+    if is_systemd; then
+      local unit
+      if [ "$role" = "iran" ]; then unit=frps.service; else unit=frpc.service; fi
+      if service_active "$unit"; then
+        ok "$unit is running"
+      else
+        err "$unit is not running — last errors:"
+        journalctl -u "$unit" -n 5 --no-pager 2>/dev/null | sed 's/^/      /' || true
+        fails=$(( fails + 1 ))
+      fi
+    fi
 
-  # 6. control port across the tunnel (the exact thing frpc needs)
-  if [ "$role" = "foreign" ]; then
-    local ctrl; ctrl="$(cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT")"
-    if net_tcp_check "$peer_gre" "$ctrl" 3; then
-      ok "frps control port $ctrl reachable on the Iran side"
-    else
-      err "frps control port $ctrl is NOT reachable on $peer_gre — frpc cannot log in until this works"
-      fails=$(( fails + 1 ))
+    # the control port across the tunnel (the exact thing frpc needs)
+    if [ "$role" = "foreign" ]; then
+      local ctrl; ctrl="$(cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT")"
+      if net_tcp_check "$peer_gre" "$ctrl" 3; then
+        ok "frps control port $ctrl reachable on the Iran side"
+      else
+        err "frps control port $ctrl is NOT reachable on $peer_gre — frpc cannot log in until this works"
+        fails=$(( fails + 1 ))
+      fi
     fi
   fi
 
@@ -547,15 +645,17 @@ cmd_relay() {
       printf 'relay mode: %s (%s)\n' "$(relay_mode)" "$(relay_describe)"
       ;;
     dnat|kernel)
-      relay_require_ports
-      step "Switching the relay mode to kernel DNAT"
-      info "run this on BOTH servers — the foreign side then runs NO frp and"
-      info "learns nothing about the config ports; Iran DNATs user traffic into"
-      info "the tunnel and SNATs the replies back"
+      step "Switching the relay mode to kernel forwarding"
+      info "run this on BOTH servers"
+      info "IRAN: forwards the traffic from its public IP into the GRE tunnel"
+      info "FOREIGN: needs nothing — no frp, no port list, it just delivers"
+      info "whatever arrives on the tunnel to the panel"
       cfg_set RELAY_MODE dnat
       cfg_set UDP_PACKET_SIZE ""    # force a fresh packet-size lock-in
-      frp_config_write 2>/dev/null || true   # keeps token/state consistent; unused in dnat
-      fw_apply || die "the NAT rules could not be applied"
+      # remove the other mode's rules first: switching back and forth must
+      # not stack DNAT/SNAT rules from both modes
+      fw_remove >/dev/null 2>&1 || true
+      fw_apply || die "the forwarding rules could not be applied"
       units_enable || true
       relay_services_restart
       ok "relay mode: dnat — $(relay_describe)"
@@ -564,6 +664,9 @@ cmd_relay() {
     frp)
       step "Switching the relay mode to frp"
       cfg_set RELAY_MODE frp
+      # a server installed straight into kernel mode has no frp binary yet
+      [ -n "$(frp_installed_version 2>/dev/null)" ] || { step "Installing frp"; frp_install_latest || warn "frp installation failed"; }
+      fw_remove >/dev/null 2>&1 || true
       fw_apply || die "the firewall rules could not be applied"
       frp_config_write || true
       units_enable || true
@@ -642,10 +745,22 @@ cmd_test() {
     warn "payload $payload did not go through — the optimizer will lower the MTU"
   fi
 
-  # 5. control port
+  # 5. the data path of the active mode
   local ctrl
   ctrl="$(cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT")"
-  if [ "$role" = "foreign" ]; then
+  if [ "$(relay_mode)" = "dnat" ]; then
+    # kernel relay: there is no frp and no local listener to check — the
+    # kernel itself moves the traffic into the tunnel
+    if [ "$role" = "iran" ]; then
+      if have iptables && iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- "$GFT_FW_TAG"; then
+        ok "client traffic is DNAT'ed into the tunnel by the kernel"
+      else
+        err "no DNAT rule found — run: sudo $GFT_CLI_NAME relay dnat"
+        fails=$(( fails + 1 ))
+      fi
+      dim "  kernel relay: no service has to listen on this server for the forwarded ports"
+    fi
+  elif [ "$role" = "foreign" ]; then
     if net_tcp_check "$(cfg_get GRE_IP_REMOTE)" "$ctrl" 3; then
       ok "frp control port $ctrl reachable on the Iran side"
     else
@@ -673,8 +788,12 @@ cmd_test() {
 
   # 6. local target
   if [ "$role" = "foreign" ]; then
-    local target; target="$(cfg_get LOCAL_TARGET_IP 127.0.0.1)"
-    if have ss && ss -ltn 2>/dev/null | grep -q ":$(ports_parse "$ports" 2>/dev/null | head -1) "; then
+    local target first
+    target="$(cfg_get LOCAL_TARGET_IP 127.0.0.1)"
+    first="$(ports_parse "$ports" 2>/dev/null | head -1)"
+    if [ -z "$first" ]; then
+      dim "  no port list: the panel address cannot be probed from a port number"
+    elif have ss && ss -ltn 2>/dev/null | grep -q ":$first "; then
       ok "the panel seems to listen on $target"
     else
       warn "nothing is listening on the first tunnelled port at $target"
@@ -856,7 +975,7 @@ cmd_service_down() {
 # ============================================================
 # Changing settings — one engine behind `gft set` and the menus
 # ============================================================
-GFT_SET_KEYS="peer-ip local-ip gre-local gre-remote tunnel-port ports target mtu ttl"
+GFT_SET_KEYS="peer-ip local-ip gre-local gre-remote tunnel-port ports keep-local target mtu ttl"
 
 set_label() { # <key>
   local role; role="$(cfg_get ROLE)"
@@ -868,7 +987,8 @@ set_label() { # <key>
     gre-local)   echo "Tunnel IP of this server" ;;
     gre-remote)  echo "Tunnel IP of the peer" ;;
     tunnel-port) echo "Tunnel (control) port" ;;
-    ports)       echo "Tunnelled ports (TCP + UDP)" ;;
+    ports)       echo "Tunnelled ports (TCP + UDP; empty = every port)" ;;
+    keep-local)  echo "Ports that must stay on THIS server when every port is forwarded" ;;
     target)      echo "Local panel address on this server" ;;
     mtu)         echo "Tunnel MTU" ;;
     ttl)         echo "Tunnel TTL" ;;
@@ -884,6 +1004,7 @@ set_current() { # <key> -> current value
     gre-remote)  cfg_get GRE_IP_REMOTE ;;
     tunnel-port) cfg_get CTRL_PORT "$GFT_DEFAULT_CTRL_PORT" ;;
     ports)       cfg_get TUNNEL_PORTS ;;
+    keep-local)  cfg_get KEEP_LOCAL_PORTS ;;
     target)      cfg_get LOCAL_TARGET_IP 127.0.0.1 ;;
     mtu)         cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU" ;;
     ttl)         cfg_get TUNNEL_TTL "$GFT_DEFAULT_TTL" ;;
@@ -895,7 +1016,8 @@ set_validate() { # <key> <value>
   case "$1" in
     peer-ip|local-ip|gre-local|gre-remote|target) is_ipv4 "$2" ;;
     tunnel-port) is_port "$2" ;;
-    ports)       ports_validate "$2" ;;
+    ports)       ports_validate_or_empty "$2" ;;
+    keep-local)  ports_validate_or_empty "$2" ;;
     mtu)         is_valid_mtu "$2" && [ "$2" -ge 576 ] ;;
     ttl)         is_uint "$2" && [ "$2" -ge 1 ] && [ "$2" -le 255 ] ;;
     *)           return 1 ;;
@@ -904,7 +1026,8 @@ set_validate() { # <key> <value>
 
 set_hint() { # <key> -> example for the prompt
   case "$1" in
-    ports) echo "comma separated, e.g. 443,8443,2053" ;;
+    ports) echo "comma separated, e.g. 443,8443 — EMPTY forwards every port" ;;
+    keep-local) echo "comma separated; SSH is always kept local" ;;
     mtu)   echo "1280-9000, lower it if packets are lost" ;;
     ttl)   echo "1-255, 64 is a safe default" ;;
     *)     echo "" ;;
@@ -925,6 +1048,7 @@ set_apply() { # <key> <value>
     gre-remote)  cfg_set GRE_IP_REMOTE "$value" ;;
     tunnel-port) cfg_set CTRL_PORT "$value" ;;
     ports)       cfg_set TUNNEL_PORTS "$(ports_list_csv "$value")" ;;
+    keep-local)  cfg_set KEEP_LOCAL_PORTS "$(ports_list_csv "$value")" ;;
     target)      cfg_set LOCAL_TARGET_IP "$value" ;;
     mtu)         cfg_set TUNNEL_MTU "$value" ;;
     ttl)         cfg_set TUNNEL_TTL "$value" ;;
@@ -937,9 +1061,11 @@ set_apply() { # <key> <value>
     gft_gre_ensure_up || warn "the GRE device could not be rebuilt"
   fi
 
-  if [ "$key" = "ports" ] || [ "$key" = "tunnel-port" ]; then
+  if [ "$key" = "ports" ] || [ "$key" = "keep-local" ] || [ "$key" = "tunnel-port" ]; then
     # the firewall, the MSS clamp and frps all depend on these
-    frp_config_write
+    if [ "$(relay_mode)" != "dnat" ] || [ -n "$(cfg_get TUNNEL_PORTS)" ]; then
+      frp_config_write
+    fi
     fw_apply || true
   elif [ "$key" = "mtu" ]; then
     gft_gre_ensure_up || true
@@ -1206,7 +1332,8 @@ ${GFT_APP_NAME} v$VERSION
   sudo $GFT_CLI_NAME test             connectivity checks
   sudo $GFT_CLI_NAME doctor           deep diagnostics (wrong IP, filtered GRE, frp errors)
   sudo $GFT_CLI_NAME encap fou        switch the tunnel to GRE-over-UDP (both servers!)
-  sudo $GFT_CLI_NAME relay dnat|frp   kernel-DNAT relay (no frp/ports on foreign) or frp relay
+  sudo $GFT_CLI_NAME relay dnat|frp   kernel port forward over the GRE IP (nothing to declare on
+                                      the foreign server) or the classic frp reverse tunnel
   sudo $GFT_CLI_NAME optimize         recalculate the best MTU + TTL now
   sudo $GFT_CLI_NAME ports add 8443   add tunnelled ports (TCP + UDP)
   sudo $GFT_CLI_NAME ports remove 8443

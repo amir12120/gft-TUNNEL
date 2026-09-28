@@ -58,7 +58,9 @@ The wizard then:
 5. shows the **default tunnel (control) port `40001`** and asks whether to keep
    it or change it,
 6. asks which **ports** to tunnel — **you type them all at once, comma
-   separated** (e.g. `443,8443,2053`) — and opens exactly those TCP + UDP ports,
+   separated** (e.g. `443,8443,2053`). The list is **optional**: leave it empty
+   and every port is forwarded through the tunnel, with nothing declared on the
+   foreign server,
 7. creates the persistent GRE device and computes the best MTU + TTL,
 8. installs the latest `frp`, writes both sides' configs, installs the systemd
    services/timers, starts everything, and **drops you into the menu**.
@@ -72,6 +74,44 @@ GFT_ROLE=foreign GFT_PORTS="443,2053" sudo -E ./install.sh
 
 > **Client configs must point at the Iranian IP** — that is the whole idea of
 > the setup. The panel itself stays on the foreign server.
+
+---
+
+## The simplest path: a port forward over the tunnel IP
+
+If all you need is "clients reach the panel through the Iranian IP", none of
+this is required: no frp, no port list on the foreign server, no per-port
+config anywhere. On **both** servers:
+
+```bash
+sudo gft relay dnat      # once on Iran, once on the foreign server
+```
+
+| server | what it does |
+|--------|--------------|
+| **Iran** | `DNAT`s incoming traffic into the tunnel and `MASQUERADE`s the replies — the only side that knows any ports |
+| **foreign** | knows no port and runs no service: it just delivers whatever arrives on the tunnel to the panel |
+
+That is exactly this, with the address the GRE link generated:
+
+```bash
+# on Iran
+iptables -t nat -A PREROUTING  -p tcp -j DNAT --to-destination 10.99.99.2
+iptables -t nat -A POSTROUTING -o gft0 -j MASQUERADE
+# on the foreign server: nothing at all
+```
+
+* With a port list configured only those ports are forwarded.
+* With an **empty** port list every port is forwarded — the SSH port (plus
+  anything you add with `sudo gft set keep-local 8080,9090`) always stays on
+  the Iranian relay, so a catch-all forward can never lock you out.
+* Back to the frp relay: `sudo gft relay frp` (installs frp if it is missing).
+* The mode per server is stored in the state file as `RELAY_MODE=frp|dnat`.
+
+```bash
+sudo gft install --relay=dnat            # install straight into kernel mode
+GFT_ROLE=iran sudo -E ./install.sh       # no port list = the same mode
+```
 
 ---
 
@@ -204,7 +244,7 @@ sudo gft status                 # link, MTU/TTL, ports, services, frp version
 sudo gft test                   # tunnel, fragmentation, control port, ports
 sudo gft doctor                 # deep diagnostics: wrong IP, filtered GRE, frp errors
 sudo gft encap fou              # switch to GRE-over-UDP on BOTH servers (raw GRE filtered)
-sudo gft relay dnat             # kernel-forwarding mode: foreign runs NO frp, knows no ports (both servers)
+sudo gft relay dnat             # port forward over the tunnel IP: foreign runs NO frp, knows no ports
 sudo gft relay frp              # back to the frp relay mode
 sudo gft optimize               # recalculate MTU + TTL right now
 sudo gft edit                   # interactive editor for every tunnel setting
@@ -225,8 +265,9 @@ sudo gft uninstall
 ```
 
 The `set` keys are:
-`peer-ip`, `local-ip`, `gre-local`, `gre-remote`, `tunnel-port`, `ports`,
-`target`, `mtu`, `ttl`.
+`peer-ip`, `local-ip`, `gre-local`, `gre-remote`, `tunnel-port`, `ports`
+(empty = every port: `sudo gft set ports ""`), `keep-local`, `target`, `mtu`,
+`ttl`.
 
 Useful environment variables:
 `GFT_ROLE`, `GFT_LOCAL_PUBLIC`, `GFT_PEER_PUBLIC`,
@@ -292,9 +333,19 @@ sudo tail -f /var/log/gft-tunnel/optimize.log
   optimizer tunes it then.
 * **High ping / packet loss** — run `gft optimize` and look at the loss column.
   If the path MTU is lower than your provider's, the MTU drops automatically.
-* **Port not reachable from clients** — `gft test` on the Iranian server shows
-  whether `frps` is listening; make sure the panel really listens on the foreign
-  server at the requested port.
+* **Port not reachable from clients** — run `sudo gft doctor` on **both**
+  servers. In frp mode it shows whether `frps` is listening on the relay; in
+  kernel mode it checks the DNAT/MASQUERADE rules instead. Make sure the panel
+  really listens on the foreign server at the requested port.
+* **The same errors come back after a reinstall** — the most common cause is a
+  **stale link**: the GRE device already exists, `ip link add` is a no-op while
+  it does, so the old peer/local stay in place and the link looks "up" while
+  nothing crosses it. `sudo gft doctor` reports it as *stale link*; the fix is
+  `sudo gft set peer-ip <the correct peer IP>` (it rebuilds the link).
+* **`dial tcp 10.99.99.1:40001: i/o timeout`** — the tunnel itself is not
+  passing traffic, frp is only the messenger. Check `ping 10.99.99.2` first, run
+  `sudo gft doctor`, and if raw GRE is filtered on the route switch both servers
+  with `sudo gft encap fou` + `sudo gft restart`.
 * **Iranian IP changed / the foreign server must follow it** — on the foreign
   server run `sudo gft set peer-ip <new Iran IP>`; the link, the firewall and the
   tunnel IPs are rebuilt in one step.

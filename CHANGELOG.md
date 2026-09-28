@@ -4,6 +4,57 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — 2026-09-28
+
+Simplicity release. The kernel relay is now a **plain port forward over the
+address the GRE link generated** — the shape of every ordinary iptables
+tunnel recipe, with nothing extra anywhere:
+
+```
+iran #   iptables -t nat -A PREROUTING -p tcp -j DNAT --to-destination 10.99.99.2
+iran #   iptables -t nat -A POSTROUTING -o gft0 -j MASQUERADE
+foreign #  (nothing at all)
+```
+
+### Added
+- **No port list is needed any more.** `sudo gft install` accepts an empty port
+  list (and `--ports=`/`GFT_PORTS` may be omitted): the relay then forwards
+  **every** port. `gft set ports ""` switches an existing install to that mode.
+  The SSH port (and anything in `gft set keep-local <ports>`) is always kept on
+  the Iranian relay, so a catch-all forward can never lock the operator out.
+- **`gft relay dnat` needs no ports and no frp.** Iran gets one DNAT per
+  protocol (port-preserving), one `MASQUERADE` and one `FORWARD` accept; the
+  foreign server gets at most a single **port-less** DNAT to the panel address
+  and **no frp at all** — it is not downloaded or configured in this mode.
+  `gft relay frp` installs frp on demand if it is missing.
+- `gft set keep-local <ports>` to pin more ports to the Iranian relay.
+- `gft doctor` now reports the GRE device endpoints and **fails on a stale
+  link** (a device left over from an earlier configuration keeps the old
+  `remote`, which looks up while nothing crosses it) with the exact fix command.
+
+### Changed
+- **Kernel mode is the default when no port list is given.** Install with a port
+  list and you get the classic frp reverse tunnel; install without one and you
+  get the kernel relay. `--relay=frp|dnat` (or `GFT_RELAY_MODE`) picks either
+  explicitly, and the choice is now stored in the state file.
+- The MSS clamp in kernel mode is one port-agnostic rule on the tunnel device
+  instead of one per port, so the TCP path survives without knowing any port.
+- `relay dnat|frp` removes the other mode's rules before applying its own, so
+  switching back and forth can no longer stack DNAT/SNAT rules from both modes.
+- `gft doctor` and `gft test` follow the active mode: in kernel mode they check
+  `ip_forward` and the DNAT/MASQUERADE rules and no longer ask for a running frp
+  service or a reachable frps control port (there is none).
+- `gft status` prints `ALL ports` (and which ports stay local) when there is no
+  port list.
+- Default MTU is `1476` (1500 − the 24 byte GRE overhead) instead of `1472`,
+  matching the documented overhead and the usual tunnel recipe.
+
+### Tests
+- `relay_dnat` covers both sub-modes: a configured port list (multiport DNAT +
+  MASQUERADE, no per-port SNAT, port-preserving) and **no port list at all**
+  (catch-all DNAT that keeps SSH local), plus the port-less rule on the foreign
+  side and the clean switch back to frp. `doctor` covers the stale-link case.
+
 ## [1.2.1] — 2026-09-27
 
 ### Fixed

@@ -199,6 +199,13 @@ ports_validate() {
   return 0
 }
 
+# like ports_validate, but an empty list is allowed (kernel relay mode:
+# forward every port instead of a hand-picked list)
+ports_validate_or_empty() {
+  [ -z "${1:-}" ] && return 0
+  ports_validate "$1"
+}
+
 # ports_parse "443,8443,2000-2003" -> one port per line, sorted, unique
 ports_parse() {
   local spec="$1" part a b i
