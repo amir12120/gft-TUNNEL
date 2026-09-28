@@ -21,6 +21,7 @@ dev_ttl()    { grep -m1 "^devttl $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
 dev_addrs()  { grep "^addr $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
 dev_local()  { grep -m1 "^devlocal $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
 dev_remote() { grep -m1 "^devremote $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
+dev_encap()  { grep -m1 "^devencap $1 " "$STATE" 2>/dev/null | awk '{print $3}'; }
 
 full="$*"
 
@@ -42,6 +43,7 @@ case "$full" in
     l="$(awk '{for (i = 1; i <= NF; i++) if ($i == "local") print $(i + 1)}' <<<"$full")"
     [ -n "$r" ] && echo "devremote $name $r" >>"$STATE"
     [ -n "$l" ] && echo "devlocal $name $l" >>"$STATE"
+    case "$full" in *"encap fou"*) echo "devencap $name fou" >>"$STATE" ;; esac
     exit 0
     ;;
 
@@ -49,7 +51,7 @@ case "$full" in
   "link del "*|"link delete "*)
     name="${full##* }"
     if dev_exists "$name"; then
-      grep -v -E "^(dev|devmtu|devttl|devlocal|devremote|addr|up) $name( |$)" "$STATE" >"$STATE.tmp" 2>/dev/null || true
+      grep -v -E "^(dev|devmtu|devttl|devlocal|devremote|devencap|addr|up) $name( |$)" "$STATE" >"$STATE.tmp" 2>/dev/null || true
       mv "$STATE.tmp" "$STATE"
       exit 0
     fi
@@ -121,8 +123,17 @@ case "$full" in
     if dev_exists "$name"; then
       mtu="$(dev_mtu "$name")"; [ -n "$mtu" ] || mtu=1472
       r="$(dev_remote "$name")"; l="$(dev_local "$name")"; t="$(dev_ttl "$name")"
-      echo "9: $name: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu $mtu qdisc noqueue state UNKNOWN mode DEFAULT group default"
-      echo "    gre remote ${r:-any} local ${l:-any} ttl ${t:-inherit}"
+      e="$(dev_encap "$name")"
+      if [ "${STUB_GRE_KERNEL_FORMAT:-0}" = "1" ]; then
+        # exactly what a real iproute2 prints for a GRE device
+        echo "9: $name@NONE: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu $mtu qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000"
+        echo "    link/gre ${l:-0.0.0.0} peer ${r:-0.0.0.0} promiscuity 0 minmtu 0 maxmtu 0"
+        [ "$e" = "fou" ] && echo "    encap fou encap-sport auto encap-dport 5555"
+      else
+        echo "9: $name: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu $mtu qdisc noqueue state UNKNOWN mode DEFAULT group default"
+        echo "    gre remote ${r:-any} local ${l:-any} ttl ${t:-inherit}"
+        [ "$e" = "fou" ] && echo "    encap fou"
+      fi
       exit 0
     fi
     echo "Device \"$name\" does not exist." >&2

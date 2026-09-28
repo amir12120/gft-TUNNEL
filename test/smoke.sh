@@ -110,7 +110,7 @@ setup_env() { # <name>
   export STUB_FRP_VERSION="0.99.0"
   export STUB_LISTEN="40001 443 2053"
   unset STUB_LOSS_AT_TTL STUB_LOSS_AT_MTU STUB_BAD_CHECKSUM STUB_FIREWALLD STUB_UFW STUB_TCP_OPEN
-  unset STUB_ECHO_IP STUB_NO_ROUTE STUB_NO_PUBLIC_IP
+  unset STUB_ECHO_IP STUB_NO_ROUTE STUB_NO_PUBLIC_IP STUB_GRE_KERNEL_FORMAT
 
   PATH="$STUB_DIR:$PATH"
   export PATH
@@ -863,6 +863,45 @@ t_doctor() {
   assert_ne "doctor fails on a stale link" "$RC" "0"
   assert_contains "doctor names the stale link" "$(cat "$ENV/out.txt")" "stale link"
   assert_contains "doctor prints the fix" "$(cat "$ENV/out.txt")" "set peer-ip 198.51.100.9"
+
+  # A real kernel prints "link/gre <local> peer <remote>", not the words
+  # remote/local in that order — misreading it would call a healthy link
+  # stale (and send the operator chasing a link that is actually fine).
+  setup_env doctor_kernel_fmt
+  seed_state iran 1476 64
+  lib_run 'frp_install_latest' >/dev/null 2>&1
+  run_cli restart
+  export STUB_GRE_KERNEL_FORMAT=1
+  run_cli doctor
+  local kout; kout="$(cat "$ENV/out.txt")"
+  assert_rc "doctor passes on a real-kernel link" "$RC" "0"
+  assert_not_contains "a matching link is never called stale" "$kout" "stale link"
+  assert_contains "doctor shows the live endpoints" "$kout" "live endpoints: local 203.0.113.10 remote 198.51.100.9"
+
+  # An iproute2 that does not spell the encapsulation out must not make the
+  # link look stale either (only definite readings are compared).
+  lib_run 'cfg_set GRE_ENCAP fou' >/dev/null 2>&1
+  run_cli doctor
+  assert_not_contains "an unreadable encapsulation is not called stale" "$(cat "$ENV/out.txt")" "stale link"
+  lib_run 'cfg_set GRE_ENCAP none' >/dev/null 2>&1
+  unset STUB_GRE_KERNEL_FORMAT
+
+  # A link left behind by an earlier install must not survive a restart:
+  # `ip link add` is a no-op while the device exists, so the only way out
+  # is destroying and rebuilding it from the state file.
+  setup_env stale_rebuild
+  seed_state iran 1476 64
+  lib_run 'frp_install_latest' >/dev/null 2>&1
+  run_cli restart
+  sed -i 's/^devremote gft0 .*/devremote gft0 198.51.100.77/' "$ENV/stubtmp/ip.state" 2>/dev/null \
+    || sed -i '' 's/^devremote gft0 .*/devremote gft0 198.51.100.77/' "$ENV/stubtmp/ip.state"
+  : >"$ENV/stubtmp/ip.log"
+  run_cli restart
+  assert_contains "restart notices the stale link" "$(cat "$ENV/out.txt")" "does not match the stored state"
+  assert_contains "the stale device is deleted first" "$(ip_log)" "ip link del gft0"
+  assert_contains "the link is rebuilt from the stored state" "$(cat "$ENV/stubtmp/ip.state")" "devremote gft0 198.51.100.9"
+  run_cli doctor
+  assert_rc "doctor passes after the automatic rebuild" "$RC" "0"
 }
 
 # ============================================================

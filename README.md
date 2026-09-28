@@ -340,8 +340,11 @@ sudo tail -f /var/log/gft-tunnel/optimize.log
 * **The same errors come back after a reinstall** — the most common cause is a
   **stale link**: the GRE device already exists, `ip link add` is a no-op while
   it does, so the old peer/local stay in place and the link looks "up" while
-  nothing crosses it. `sudo gft doctor` reports it as *stale link*; the fix is
-  `sudo gft set peer-ip <the correct peer IP>` (it rebuilds the link).
+  nothing crosses it. `sudo gft doctor` reports it as *stale link* and prints
+  the live endpoints next to the stored ones. `sudo gft restart` now detects
+  that by itself and rebuilds the link from the stored values (so does the boot
+  unit and the hourly optimizer); `sudo gft set peer-ip <the correct peer IP>`
+  does the same thing when the peer really changed.
 * **`dial tcp 10.99.99.1:40001: i/o timeout`** — the tunnel itself is not
   passing traffic, frp is only the messenger. Check `ping 10.99.99.2` first, run
   `sudo gft doctor`, and if raw GRE is filtered on the route switch both servers

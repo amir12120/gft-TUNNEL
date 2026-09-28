@@ -4,6 +4,32 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] — 2026-09-28
+
+### Fixed
+- **`gft doctor` no longer reports *stale link* on a healthy tunnel.** The GRE
+  endpoints are now read from the live device the way a real kernel prints them
+  (`link/gre <local> peer <remote>`) instead of looking for the wording only the
+  test stub used. Both spellings are understood, and the parsed values are shown
+  next to the stored ones.
+- **A GRE link that contradicts the state file is rebuilt automatically.**
+  Creating a device is a no-op while one exists, so an old `local`/`remote`
+  could survive a re-install, a `gft restart` or a reboot while the device still
+  looked `up` — the classic "nothing changed after the re-install". Everything
+  that brings the link up (`restart`, `service-up` on boot, `optimize`, the
+  hourly watchdog) now notices the disagreement, prints the reason and rebuilds
+  the link from the stored values.
+- Only endpoints the kernel positively reports are compared: a device created
+  without a local address (NAT mode) or an iproute2 that does not spell the
+  encapsulation out is never called stale, so no rebuild loops.
+
+### Tests
+- `doctor` covers the real kernel spelling (a matching link must never be called
+  stale), an unreadable encapsulation, and the automatic rebuild of a mutated
+  link (the old device is deleted, then recreated at the stored peer). The `ip`
+  stub can now print both output formats and remembers the device's
+  encapsulation.
+
 ## [1.3.0] — 2026-09-28
 
 Simplicity release. The kernel relay is now a **plain port forward over the

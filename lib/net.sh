@@ -333,7 +333,82 @@ gft_gre_peer_reachable() {
   [ "${replies:-0}" -ge 1 ]
 }
 
+# Prints "<local> <remote> <encap>" exactly as the LIVE device has them, so a
+# link left over from an earlier configuration can be told apart from the
+# one the state file describes. "-" means "the kernel did not report this
+# endpoint" (a device created without a local address, for instance) and
+# encap is "?" when the running iproute2 does not spell it out — neither is
+# ever treated as a difference.
+#   real iproute2 :  link/gre 10.0.0.1 peer 10.0.0.2 [encap fou encap-sport …]
+#   test stub     :  gre remote 10.0.0.2 local 10.0.0.1 ttl 64
+# Exit code 1 when the device is not there or reports no endpoints at all.
+gft_gre_live_endpoints() {
+  local out l r e
+  out="$(ip -d link show dev "$GFT_TUN_DEV" 2>/dev/null || true)"
+  [ -n "$out" ] || return 1
+  out="$(printf '%s' "$out" | tr '\n' ' ' | tr -s ' ')"
+  # "link/gre <local> peer <remote>" (kernel) and
+  # "gre remote <remote> local <local>" (what the tests print) both work
+  l="$(printf '%s' "$out" | awk '{
+    for (i = 1; i <= NF; i++) {
+      if ($i == "local") { print $(i + 1); exit }
+      if ($i ~ /^link\/(gre|ipip|gretap)$/) { print $(i + 1); exit }
+    }}')"
+  r="$(printf '%s' "$out" | awk '{
+    for (i = 1; i <= NF; i++) {
+      if ($i == "remote" || $i == "peer") { print $(i + 1); exit }
+    }}')"
+  is_ipv4 "$l" || l="-"
+  is_ipv4 "$r" || r="-"
+  [ "$l" = "-" ] && [ "$r" = "-" ] && return 1
+  e="?"
+  case "$out" in
+    *"encap fou"*) e=fou ;;
+    *"encap none"*) e=none ;;
+  esac
+  printf '%s %s %s' "$l" "$r" "$e"
+}
+
+# 0 (and a reason on stdout) when the LIVE device disagrees with the stored
+# state. This is the classic "nothing changes after a re-install": creating
+# a GRE device is a no-op while one exists, so an old local/remote address
+# survives every install, reboot and restart while the link still looks up.
+# Only differences that were positively reported are flagged, so a device
+# the kernel describes loosely is never called stale.
+gft_gre_stale_reason() {
+  local want_l want_r want_e live l r e
+  want_l="$(cfg_get LOCAL_PUBLIC_IP)"
+  want_r="$(cfg_get PEER_PUBLIC_IP)"
+  want_e="$(cfg_get GRE_ENCAP none)"
+  live="$(gft_gre_live_endpoints)" || return 1
+  l="${live%% *}"; r="${live#* }"; r="${r%% *}"; e="${live##* }"
+  [ "$l" = "-" ] && l=""
+  [ "$r" = "-" ] && r=""
+  if [ -n "$want_r" ] && [ -n "$r" ] && [ "$r" != "$want_r" ]; then
+    printf 'the live device points at %s while the state says %s' "$r" "$want_r"
+    return 0
+  fi
+  if [ -n "$want_l" ] && [ -n "$l" ] && [ "$l" != "$want_l" ] && net_ip_is_local "$want_l"; then
+    printf 'the live device is bound to %s while the state says %s' "$l" "$want_l"
+    return 0
+  fi
+  case "$want_e:$e" in
+    none:fou) printf 'the live device is wrapped in FOU/UDP while the state says raw GRE'; return 0 ;;
+    fou:none) printf 'the live device sends raw GRE while the state says FOU/UDP'; return 0 ;;
+  esac
+  return 1
+}
+
 gft_gre_ensure_up() {
+  # Never trust a device that contradicts the state file: rebuild it from the
+  # stored values instead of leaving the old peer in place (this is what makes
+  # `restart`, the boot unit and the hourly optimizer self-healing).
+  local why
+  if why="$(gft_gre_stale_reason)"; then
+    warn "the live GRE link does not match the stored state — rebuilding it"
+    dim "  $why"
+    gft_gre_destroy || true
+  fi
   gft_gre_create || return 1
   gft_gre_add_addr "$(cfg_get GRE_IP_LOCAL "$GFT_DEFAULT_GRE_IP_IRAN")" "$(cfg_get GRE_PREFIX 30)" || true
   gft_gre_set_mtu "$(cfg_get TUNNEL_MTU "$GFT_DEFAULT_MTU")" || true

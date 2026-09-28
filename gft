@@ -529,15 +529,27 @@ cmd_doctor() {
   # earlier configuration keeps the OLD local/remote address (creating is
   # a no-op while it exists), which looks "up" while nothing crosses it.
   if gft_gre_dev_exists; then
-    local dshow dtail
+    local dshow dtail endpoints stale
     dshow="$(gft_gre_show)"
     dtail="$(printf '%s' "$dshow" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//')"
     ok "GRE device $dev exists ($(printf '%s' "$dshow" | head -1 | sed 's/^ *//'))"
     dim "  $dtail"
-    if [ -n "$peer_pub" ] && ! printf '%s\n' "$dshow" | grep -q "remote $peer_pub "; then
-      err "the device does not point at the stored peer $peer_pub (stale link)"
+    # The endpoints are read from the LIVE device (both the kernel's
+    # "link/gre <local> peer <remote>" spelling and the older one), then
+    # compared with the state file.
+    endpoints="$(gft_gre_live_endpoints || true)"
+    if [ -n "$endpoints" ]; then
+      local el er
+      el="$(printf '%s' "$endpoints" | cut -d' ' -f1)"; [ "$el" = "-" ] && el="?"
+      er="$(printf '%s' "$endpoints" | cut -d' ' -f2)"; [ "$er" = "-" ] && er="?"
+      dim "  live endpoints: local $el remote $er (state: local ${stored:-?} remote ${peer_pub:-?})"
+    fi
+    if stale="$(gft_gre_stale_reason)"; then
+      err "the device does not match the stored state (stale link)"
+      dim "  $stale"
       fails=$(( fails + 1 ))
-      dim "  fix: sudo $GFT_CLI_NAME set peer-ip $peer_pub   (this rebuilds the link)"
+      dim "  fix: sudo $GFT_CLI_NAME restart                (rebuilds the link from the state)"
+      dim "  or : sudo $GFT_CLI_NAME set peer-ip $peer_pub  (the same rebuild, for a changed peer)"
     fi
   else
     err "GRE device $dev is missing — try: sudo $GFT_CLI_NAME restart"
